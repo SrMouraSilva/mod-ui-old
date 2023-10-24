@@ -2895,7 +2895,7 @@ class Host(object):
                 presetbundle = os.path.expanduser("%s/%s-%s-%i.lv2" % (LV2_PLUGIN_DIR,
                                                                        instance.replace("/graph/","",1),
                                                                        symbolname,
-                                                                       randint(1,99999)))
+                                                                       randint(1,99999))) # TODO Replace to UUID?
                 if os.path.exists(presetbundle):
                     continue
                 break

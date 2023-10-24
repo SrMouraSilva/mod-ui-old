@@ -9,18 +9,6 @@ from mod.protocol import Protocol
 from mod.session import UserPreferences
 
 
-def create_host():
-    # return SESSION.host
-
-    # Avoid to except "Command is already registered"
-    Protocol.COMMANDS_USED = []
-
-    callback_hmi = lambda: None
-    callback_host = lambda: None
-
-    hmi = FakeHMI(callback_hmi)
-    return FakeHost(hmi, UserPreferences(), callback_host)
-
 
 class HostHmiSnapshotTestCase(unittest.TestCase):
 

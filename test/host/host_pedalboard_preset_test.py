@@ -12,17 +12,7 @@ from mod.development import FakeHost, FakeHMI
 from mod.protocol import Protocol
 from mod.session import UserPreferences
 from mod.settings import DEFAULT_SNAPSHOT_NAME
-
-
-def create_host():
-    # Avoid to except "Command is already registered"
-    Protocol.COMMANDS_USED = []
-
-    callback_hmi = lambda: None
-    message_callback = lambda text: print(text)
-
-    hmi = FakeHMI(callback_hmi)
-    return FakeHost(hmi, UserPreferences(), message_callback)
+from test.util import create_host
 
 
 class HostSnapshotTestCase(AsyncTestCase):

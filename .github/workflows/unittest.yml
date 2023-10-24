@@ -21,7 +21,7 @@ jobs:
           source modui-env/bin/activate
           pip3 install -r requirements.txt
           # pytest
-          pip3 install pytest pytest-cov
+          pip3 install pytest pytest-cov pytest-tornado
           sed -i -e 's/collections.MutableMapping/collections.abc.MutableMapping/' modui-env/lib/python3.10/site-packages/tornado/httputil.py
           # mod
           python3 setup.py develop
