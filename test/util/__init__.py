@@ -7,8 +7,6 @@ from mod.session import UserPreferences
 from modtools.utils import init as lv2_init
 
 def create_host():
-    lv2_init()
-
     # Avoid to except "Command is already registered"
     Protocol.COMMANDS_USED = []
 

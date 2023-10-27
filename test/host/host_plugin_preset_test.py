@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2012-2023 MOD Audio UG
 # SPDX-License-Identifier: AGPL-3.0-or-later
-
 import unittest
 from uuid import uuid4
 
@@ -10,9 +9,18 @@ from tornado.gen import Task
 from tornado.testing import AsyncTestCase, gen_test
 
 from test.util import create_host
+from test.util.mock.mock_modtools_utils import MockModtoolsUtils
+from test.util.plugins.carla_audiogain_s import CarlaAudioGainS
 
 
 class HostSnapshotTestCase(AsyncTestCase):
+
+    def setUp(self):
+        super().setUp()
+        self.modtools = MockModtoolsUtils()
+        self.modtools.start()
+
+        self.addCleanup(lambda: self.modtools.stop())
 
     @gen_test
     def test_save_invalid_plugin_instance(self):
@@ -116,7 +124,7 @@ class HostSnapshotTestCase(AsyncTestCase):
 
     def add_plugin(self, host, plugin_id):
         plugin_graph_id = '/graph/' + plugin_id
-        uri = 'http://kxstudio.sf.net/carla/plugins/audiogain_s'
+        uri = CarlaAudioGainS().uri
         ok = yield Task(host.add_plugin, plugin_graph_id, uri, 0.0, 0.0)
         self.assertTrue(ok)
         return plugin_graph_id

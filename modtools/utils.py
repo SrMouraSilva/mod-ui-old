@@ -8,9 +8,10 @@ from mod import get_unique_name
 from sys import platform
 
 # ------------------------------------------------------------------------------------------------------------
-# Convert a ctypes c_char_p into a python string
-
 def charPtrToString(charPtr):
+    """
+    Convert a ctypes c_char_p into a python string
+    """
     if not charPtr:
         return ""
     if isinstance(charPtr, str):
@@ -18,9 +19,10 @@ def charPtrToString(charPtr):
     return charPtr.decode("utf-8", errors="ignore")
 
 # ------------------------------------------------------------------------------------------------------------
-# Convert a ctypes POINTER(c_char_p) into a python string list
-
 def charPtrPtrToStringList(charPtrPtr):
+    """
+    Convert a ctypes POINTER(c_char_p) into a python string list
+    """
     if not charPtrPtr:
         return []
 
@@ -37,9 +39,11 @@ def charPtrPtrToStringList(charPtrPtr):
     return strList
 
 # ------------------------------------------------------------------------------------------------------------
-# Convert a ctypes POINTER(c_<num>) into a python number list
 
 def numPtrToList(numPtr):
+    """
+    Convert a ctypes POINTER(c_<num>) into a python number list
+    """
     if not numPtr:
         return []
 
@@ -124,9 +128,11 @@ def toPythonType(value, attr):
     return value
 
 # ------------------------------------------------------------------------------------------------------------
-# Convert a ctypes struct into a python dict
 
 def structToDict(struct):
+    """
+    Convert a ctypes struct into a python dict
+    """
     return dict((attr, toPythonType(getattr(struct, attr), attr)) for attr, value in struct._fields_)
 
 def unionToDict(struct):
