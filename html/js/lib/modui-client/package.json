@@ -1,0 +1,22 @@
+{
+  "name": "modui-client",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Typed browser client for the mod-ui backend (HTTP + WebSocket). See docs/openapi.yml.",
+  "license": "AGPL-3.0-or-later",
+  "type": "module",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "build": "esbuild modui-client.ts --bundle --format=iife --target=es2018 --outfile=../modui-client.js",
+    "watch": "esbuild modui-client.ts --bundle --format=iife --target=es2018 --sourcemap=inline --outfile=../modui-client.js --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "tsc --noEmit && vitest run"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "typescript": "7.0.2",
+    "vitest": "5.0.3"
+  }
+}

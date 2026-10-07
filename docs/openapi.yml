@@ -1,0 +1,3066 @@
+openapi: 3.1.0
+
+info:
+  title: MOD UI backend API
+  version: "1.0.0"
+  summary: HTTP, WebSocket and server-rendered page interfaces exposed by the mod-ui Tornado web server.
+  description: |
+    This document describes **every way the mod-ui backend (`mod/webserver.py`, `mod/session.py`,
+    `mod/host.py`, `mod/addressings.py`) talks to a browser-side frontend**.
+    It was written by reading the server code and the bundled frontend (`html/js/*.js`).
+
+    OpenAPI has no native vocabulary for WebSockets, so the three WebSocket endpoints are modelled as
+    `GET` operations that answer `101 Switching Protocols`, and their message protocol is documented in the
+    operation descriptions (Markdown tables) and, where the payload is JSON, in `components/schemas`.
+
+    ## Communication channels
+
+    | # | Channel | Direction | Used for |
+    |---|---------|-----------|----------|
+    | 1 | **HTTP "REST-like" endpoints** (JSON) | browser → server | Commands and queries: plugins, pedalboards, snapshots, banks, presets, system settings, MIDI devices, files. |
+    | 2 | **Main WebSocket** `/websocket` (text frames) | both ways | Real-time state: parameter values, meters, CPU stats, transport, graph changes, hardware mappings, pedalboard loading progress. |
+    | 3 | **Remote WebSockets** `/rpbsocket`, `/rplsocket` | MOD cloud web pages → server | Cloud pages (mod.audio) asking the device to load a pedalboard or install a plugin. |
+    | 4 | **Server-rendered HTML** (`/`, `/settings`, `/pedalboard.html`, ...) | server → browser | Tornado templates with the initial state injected as template variables. |
+    | 5 | **Static files and binary transfers** | both ways | Plugin GUI assets, thumbnails, `.tar.gz` bundles, firmware/OS update uploads, user file uploads, recordings. |
+    | 6 | **HTTP long-poll** `/recording/play/wait` | server → browser | Notifies the browser when playback of a recording ended. |
+    | 7 | **Browser redirect callback** `/effect/t3k/select/{instance}` | external site → server → WebSocket | TONE3000 tone picker: the callback hits the HTTP API and the result is pushed to the UI over the main WebSocket. |
+    | 8 | **Cross-origin (CORS) calls** from `*.mod.audio` pages | cloud page → server | `/hello`, `/pedalboard/load_remote/{id}`, `/sdk/*`. |
+
+    Things that are **not** part of the frontend contract but produce the events described here (and are therefore
+    out of scope): the `mod-host` TCP sockets (ports 5555/5556), the HMI serial link, Control Chain, JACK callbacks and
+    Unix signals (`SIGUSR1`/`SIGUSR2`). Their effects reach the browser through the main WebSocket.
+
+    ## Conventions shared by all HTTP endpoints
+
+    * **No authentication is enforced.** The server trusts the local network. The frontend sends
+      `Authorization: MOD <token>` on some uploads, but this server never reads it (it is meant for cloud servers).
+    * **Result convention.** Most handlers answer `200` with a *bare JSON boolean* (`true` / `false`). `false` means the
+      operation was refused or failed; a non-2xx status is only used for malformed requests (missing argument,
+      unknown plugin URI, ...) or unhandled exceptions. Handlers that return structured data use objects, and many of
+      them include an `ok` boolean as well.
+    * **Argument passing.** Tornado's `get_argument` is used everywhere, which reads the query string **and** the
+      form-encoded body. Operations are documented with the form the frontend actually uses (query string for `GET`,
+      `application/x-www-form-urlencoded` for `POST`), but either location is accepted by the server. A missing
+      required argument yields `400 Missing argument <name>`.
+    * **`GET` is used for state-changing operations** (add/remove plugin, connect, snapshot load, ...). This is a
+      historical design choice; those operations are **not** idempotent or safe.
+    * **Plugin instances and ports in paths.** Instances look like `/graph/<name>` (the pedalboard itself is
+      `/pedalboard`). In URLs the leading slash of the instance doubles as the path separator, so
+      `GET /effect/add//graph/Gain` and `GET /effect/add/graph/Gain` are equivalent. Ports are written
+      `<instance>/<symbol>`, e.g. `/graph/Gain/gain`. Special symbols: `:bypass`, `:presets`, `:bpm`, `:bpb`, `:rolling`.
+      Allowed characters are `A-Z a-z 0-9 _ /` (plus `:` for parameter addressing).
+    * **Caching.** `Date` and `ETag` headers are removed. Static files and a few JSON endpoints marked with
+      `Cache-Control: public, max-age=31536000` are meant to be cache-busted by the client through a `v` query
+      parameter (the image/release version). Templates additionally *require* `v` (see "Pages").
+    * **Errors from Tornado** (`HTTPError`, uncaught exceptions) are HTML pages, not JSON.
+    * **Sync model.** Changes made through HTTP are also broadcast to *every* connected WebSocket, so several browser
+      tabs/devices stay in sync. Changes originating from a WebSocket client are broadcast to all the *other* sockets.
+
+  license:
+    name: AGPL-3.0-or-later
+    identifier: AGPL-3.0-or-later
+
+servers:
+  - url: http://{host}:{port}
+    description: >-
+      A MOD device or a local development instance. The port is `MOD_DEVICE_WEBSERVER_PORT` (default 80).
+      With `MOD_DESKTOP=1` the server only listens on 127.0.0.1. WebSockets use the same host and port with the `ws://` scheme.
+    variables:
+      host:
+        default: localhost
+        description: Host name or IP of the device (e.g. `modduo.local`).
+      port:
+        default: "80"
+        description: Value of `MOD_DEVICE_WEBSERVER_PORT`.
+
+# The server enforces no authentication (see "Conventions" in the description).
+security: []
+
+tags:
+  - name: Pages
+    description: Server-rendered HTML, templates and static assets.
+  - name: WebSocket
+    description: >-
+      Real-time channels. See the description of each operation for the complete message catalogue.
+  - name: System
+    description: Device information, preferences, maintenance commands and audio engine settings.
+  - name: Updates
+    description: Firmware (Control Chain) and MOD OS update uploads.
+  - name: Plugins
+    description: Plugin catalogue, plugin resources, installation and removal.
+  - name: Pedalboard graph
+    description: Live editing of the loaded pedalboard (add/remove plugins, connections, parameters).
+  - name: Presets
+    description: Plugin presets.
+  - name: Pedalboards
+    description: Pedalboard library, loading, saving and thumbnails.
+  - name: Snapshots
+    description: Pedalboard snapshots.
+  - name: Banks
+    description: Pedalboard banks.
+  - name: MIDI
+    description: Hardware MIDI devices.
+  - name: Files
+    description: User files (IRs, NAM models, audio, ...).
+  - name: Recording
+    description: Audio capture and playback.
+  - name: Cloud
+    description: Cloud account/token helpers and cross-origin entry points used by mod.audio pages.
+  - name: SDK
+    description: Endpoints for the MOD plugin SDK.
+  - name: TONE3000
+    description: TONE3000 integration callback.
+
+paths:
+  # =====================================================================================================================
+  # Pages, templates and static files
+  # =====================================================================================================================
+  /:
+    get:
+      tags: [Pages]
+      operationId: getIndexPage
+      summary: Main UI page (`index.html`)
+      description: |
+        Renders `html/index.html` with the initial state of the device injected as Tornado template variables
+        (see schema `IndexTemplateContext`). The handler first waits for Control Chain devices to settle
+        (`wait_for_hardware_if_needed`), so the request can take a moment right after boot.
+
+        **Version redirect rules** (shared by all template pages, handled by `TemplateHandler`):
+
+        1. no `v` query parameter → `302` to the same URI with `v=<current version>` appended;
+        2. `v` differs from the current version (only when running a real image, `IMAGE_VERSION` set) → `302` with the
+           correct version;
+        3. the requested `*.html` file does not exist → `302` to `/?v=<version>`.
+
+        The current version is the image version without its leading `v`, or a start-up Unix timestamp on dev setups.
+      parameters:
+        - $ref: '#/components/parameters/Version'
+      responses:
+        "200":
+          description: Rendered HTML page.
+          content:
+            text/html:
+              schema:
+                type: string
+        "302":
+          $ref: '#/components/responses/VersionRedirect'
+  /index.html:
+    get:
+      tags: [Pages]
+      operationId: getIndexHtml
+      summary: Alias of `/`
+      parameters:
+        - $ref: '#/components/parameters/Version'
+      responses:
+        "200":
+          description: Rendered HTML page (same as `/`).
+          content:
+            text/html:
+              schema:
+                type: string
+        "302":
+          $ref: '#/components/responses/VersionRedirect'
+  /{page}.html:
+    get:
+      tags: [Pages]
+      operationId: getTemplatePage
+      summary: Any other HTML page of the UI
+      description: |
+        Matches `[a-z0-9]+.html` inside the HTML directory. Pages with a dedicated context builder:
+
+        | Page | Extra query | Injected variables |
+        |------|-------------|--------------------|
+        | `pedalboard.html` | `bundlepath` (required) | `default_icon_template`, `default_settings_template`, `pedalboard` (base64 of the JSON `PedalboardInfo`; an empty skeleton if the bundle cannot be read) |
+        | `allguis.html` | – | `version` |
+        | `settings.html` | – | `cloud_url`, `controlchain_url`, `version`, `hmi_eeprom` (`'true'`/`'false'`), `preferences` (JSON of the preferences file), `feedback_url`, `bufferSize`, `sampleRate` |
+        | `t3k.html` | – | `version` |
+        | `t3ksplash.html` | – | `version`, `t3k_api_key` |
+        | any other (`icon.html`, `store.html`, `desktop-pp.html`, `desktop-tou.html`, `country_list.html`, ...) | – | none |
+
+        Version redirect rules are the same as for `/`.
+      parameters:
+        - name: page
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[a-z0-9]+$'
+            examples: [settings, pedalboard, allguis, t3k, t3ksplash, store, icon]
+        - $ref: '#/components/parameters/Version'
+        - name: bundlepath
+          in: query
+          required: false
+          description: Only for `pedalboard.html`. Absolute path of the pedalboard bundle to preview.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Rendered HTML page.
+          content:
+            text/html:
+              schema:
+                type: string
+        "302":
+          $ref: '#/components/responses/VersionRedirect'
+  /allguis:
+    get:
+      tags: [Pages]
+      operationId: redirectAllGuis
+      summary: Shortcut for `/allguis.html`
+      parameters:
+        - $ref: '#/components/parameters/Version'
+      responses:
+        "301":
+          description: Permanent redirect to `/allguis.html?v=<version>`.
+        "302":
+          $ref: '#/components/responses/VersionRedirect'
+  /settings:
+    get:
+      tags: [Pages]
+      operationId: redirectSettings
+      summary: Shortcut for `/settings.html`
+      parameters:
+        - $ref: '#/components/parameters/Version'
+      responses:
+        "301":
+          description: Permanent redirect to `/settings.html?v=<version>`.
+        "302":
+          $ref: '#/components/responses/VersionRedirect'
+  /sdk:
+    get:
+      tags: [Pages]
+      operationId: redirectSdk
+      summary: Redirect to the MOD SDK web UI (port 9000)
+      parameters:
+        - $ref: '#/components/parameters/Version'
+      responses:
+        "301":
+          description: Permanent redirect to the same host on port `9000`.
+        "302":
+          $ref: '#/components/responses/VersionRedirect'
+  /load_template/{name}.html:
+    get:
+      tags: [Pages]
+      operationId: getIncludeTemplate
+      summary: Raw HTML snippet from `html/include`
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[a-z_]+$'
+      responses:
+        "200":
+          description: The file contents, unprocessed.
+          content:
+            text/plain:
+              schema:
+                type: string
+  /js/templates.js:
+    get:
+      tags: [Pages]
+      operationId: getBundledTemplates
+      summary: All `html/include/*.html` templates bundled as JavaScript
+      description: |
+        Emits one statement per file whose name matches `^[a-z_]+\.html$`:
+        `TEMPLATES['<name without .html>'] = '<escaped contents>';`. Cached for a year (the URL is expected to carry `?v=`).
+      responses:
+        "200":
+          description: JavaScript source.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheForever'
+          content:
+            text/javascript:
+              schema:
+                type: string
+  /resources/{path}:
+    get:
+      tags: [Pages, Plugins]
+      operationId: getResource
+      summary: Static resource (shared or plugin specific)
+      description: |
+        Without `uri`, serves a file from `<html>/resources/`. With `uri`, the file is first looked up in the
+        plugin's `modgui` resources directory and, if it is not there, falls back to the shared directory.
+      parameters:
+        - name: path
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Relative file path, may contain slashes.
+        - name: uri
+          in: query
+          required: false
+          schema:
+            type: string
+          description: LV2 URI of the plugin whose GUI resources should be searched first.
+      responses:
+        "200":
+          description: File contents (content type guessed from the extension).
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheForever'
+          content:
+            '*/*':
+              schema:
+                type: string
+                format: binary
+        "404":
+          $ref: '#/components/responses/NotFound'
+  /{static_path}:
+    get:
+      tags: [Pages]
+      operationId: getStaticFile
+      summary: Any other file from the HTML directory (catch-all)
+      description: |
+        Last route of the application. Serves `css/`, `js/`, `img/`, `fonts/`, `favicon.ico`, ... with
+        `Cache-Control: public, max-age=31536000` and `Expires` in 2035. Paths without a registered route that do not
+        exist also land here and yield `404` (for instance, the frontend calls `GET /effect/search`, which has no handler).
+      parameters:
+        - name: static_path
+          in: path
+          required: true
+          allowReserved: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: File contents.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheForever'
+          content:
+            '*/*':
+              schema:
+                type: string
+                format: binary
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  # =====================================================================================================================
+  # WebSockets
+  # =====================================================================================================================
+  /websocket:
+    get:
+      tags: [WebSocket]
+      operationId: connectMainWebSocket
+      summary: Main real-time channel (UI ⇄ backend)
+      description: |
+        Upgrade to a WebSocket (`ws://<host>:<port>/websocket`). All frames are **UTF-8 text**; there is no JSON
+        envelope. A frame is `command arg1 arg2 ...` separated by single spaces. Where a payload can contain spaces it is
+        always the **last** argument, or it is base64 encoded JSON. Values written with `%f` use Python formatting
+        (`1.000000`). Several human readable labels have their spaces replaced by `_` on the wire.
+
+        ## Session life-cycle
+
+        1. On `open`, Nagle is disabled. If this is the **first** socket, the backend starts a UI session
+           (tells mod-host/HMI that a UI is connected, resets the `data_ready` flow control).
+        2. The socket is registered and the backend **replays the whole current state** to it (see
+           "Initial state replay").
+        3. When the **last** socket closes the UI session ends (the HMI takes control again).
+        4. Every ~1 s the backend sends `stats`; every 5 s `sys_stats` (when memory statistics are available);
+           it also sends `ping` when `GET /ping` is called (the browser must answer `pong`).
+        5. `stop` is sent when the audio host crashed/restarted, when the HMI is re-initialised, or on `SIGUSR2`
+           (the server then also closes all sockets). The UI blocks itself and the user has to reload.
+
+        ## Flow control (`data_ready`)
+
+        mod-host batches parameter feedback (output ports, MIDI mapped values, patch parameters) and stops sending until the
+        UI acknowledges. After each batch the backend sends `data_ready <counter>`; the browser must answer
+        `data_ready <counter>` (the bundled frontend debounces this by 50 ms and does **not** answer while it is still
+        receiving non-`param_set` messages). Only an answer with the *current* counter unblocks mod-host. If no answer
+        arrives within 2 s the backend repeats `data_ready` with the same counter, and also repeats it
+        to a socket that connects while an answer is pending. Clients that never acknowledge will starve
+        `output_set`/`patch_set`/MIDI-learn feedback.
+
+        ## Initial state replay
+
+        Sent to each new socket, in this order:
+
+        `sys_stats`, `stats`, `transport`, `truebypass`, `loading_start`, `size`, `hw_add`*, `add_hw_port`* (audio in, CV in,
+        audio out, CV out, MIDI in, MIDI out, MIDI loopback), `add`* (one per plugin), `midi_map` (bypass CC) and `preset`
+        per plugin, `param_set`* / `output_set`* / `patch_set`* per plugin, `connect`*, `add_cv_port`*, `hw_map`*,
+        `midi_map`*, `cv_map`*, `loading_end`.
+
+        A *pedalboard load* (HTTP `POST /pedalboard/load_bundle/`, HMI bank navigation, ...) produces the same bracket
+        (`loading_start` … `loading_end`) with the new content. Loading does **not** clear the previous content by
+        itself: the browser calls `GET /reset` first (which broadcasts `remove :all`), and the HMI path resets internally.
+
+        ---
+        # Server → client messages
+
+        ## Housekeeping
+
+        | Command | Arguments | Meaning |
+        |---------|-----------|---------|
+        | `ping` | – | Liveness probe (triggered by `GET /ping`). Reply with `pong`. |
+        | `stop` | – | Backend lost the audio host or is restarting; the UI must block. Sent just before the server closes sockets on `SIGUSR2`. |
+        | `data_ready` | `<counter:int>` | Flow control token, see above. |
+        | `cc-device-updated` | – | A Control Chain firmware update finished (sent after `SIGUSR1` while an update file exists). |
+        | `log` | `<level:int> <message...>` | Plugin log line. `0`=trace, `1`=note, `2`=warning, `3`=error. Message is the rest of the frame. |
+        | `progress` | `<source> '<message>' <percentage> <extra...>` | Long operation progress. `message` is wrapped in single quotes and may contain spaces. Currently emitted by `Host.notify_progress`. |
+        | `bufsize` | `<frames:int>` | JACK buffer size changed. |
+        | `truebypass` | `<left:0\|1> <right:0\|1>` | Hardware true-bypass state. |
+
+        ## Statistics
+
+        | Command | Arguments | Meaning |
+        |---------|-----------|---------|
+        | `stats` | `<cpuLoad:float %> <xruns:int>` | DSP load (one decimal) and xrun counter, every second. |
+        | `sys_stats` | `<memLoad:float %> <cpuFreq> <cpuTemp>` | RAM usage in %, CPU frequency in kHz and temperature in m°C. `0` means "not available". `memLoad` is `??` when unreadable. |
+
+        ## Transport
+
+        | Command | Arguments | Meaning |
+        |---------|-----------|---------|
+        | `transport` | `<rolling:0\|1> <bpb:float> <bpm:float> <syncMode>` | Global transport. `syncMode` is `none`, `midi_clock_slave` or `link`. |
+
+        ## Plugin graph and values
+
+        | Command | Arguments | Meaning |
+        |---------|-----------|---------|
+        | `add` | `<instance> <uri> <x:float> <y:float> <bypassed:0\|1> <version> <officialBuild:0\|1>` | A plugin exists. `version` is `<minor>.<micro>.<release>.<builder>`; the UI fetches `/effect/get` with it as a cache buster (`officialBuild=1` ⇒ cacheable). |
+        | `remove` | `<instance>` or `:all` | Plugin (or hardware port) removed. `:all` clears the whole pedalboard. |
+        | `connect` | `<port_from> <port_to>` | A connection exists. |
+        | `disconnect` | `<port_from> <port_to>` | A connection was removed. |
+        | `param_set` | `<instance> <symbol> <value:float>` | Control port value. `:bypass` carries `1.0`/`0.0`. Also generated from transport changes for ports with a transport designation. |
+        | `output_set` | `<instance> <symbol> <value:float>` | Monitored output port value (meters, tuner, ...). Subject to `data_ready` flow control. |
+        | `patch_set` | `<instance> <writable:0\|1> <uri> <type:char> <value...>` | LV2 patch parameter value. `type` is one of `b` bool, `i` int, `l` long, `f` float, `g` double, `s` string, `p` path, `u` URI. `value` is the rest of the frame and may contain spaces. |
+        | `plugin_pos` | `<instance> <x:int> <y:int>` | Another client moved a plugin (never echoed to the sender). |
+        | `preset` | `<instance> <presetUri>` or `null` | Current preset of a plugin; `null` means none. |
+        | `size` | `<width:int> <height:int>` | Pedalboard canvas size at full zoom. (The bundled UI ignores it.) |
+        | `pedal_snapshot` | `<index:int> <name...>` | Current snapshot changed. Name is the rest of the frame. |
+
+        ## Pedalboard loading bracket
+
+        | Command | Arguments | Meaning |
+        |---------|-----------|---------|
+        | `loading_start` | `<empty:0\|1> <modified:0\|1>` | A (re)load begins; the UI shows a progress overlay and suppresses "modified" marking. |
+        | `loading_end` | `<snapshotId:int>` | Everything has been sent; the UI queries `GET /snapshot/name?id=<snapshotId>` and finalises. |
+
+        ## Hardware ports
+
+        Port ids look like `/graph/<name>`. `<name>` in the *Title* column has spaces replaced by `_`.
+
+        | Command | Arguments | Meaning |
+        |---------|-----------|---------|
+        | `add_hw_port` | `<port> <type:audio\|midi\|cv> <direction:0\|1> <title> <index:int>` | A physical/virtual port appeared. `direction` is `0` for an *input of the device* (rendered on the canvas as a signal source) and `1` for an *output of the device* (a sink). `index` orders the ports (`1..n` for audio/CV, `100+` external, `200+` USB gadget, `42` MIDI loopback). |
+        | `remove_hw_port` | `<port>` | The port disappeared (device unplugged, mode changed). Its connections are removed with separate `disconnect` frames. |
+
+        ## Addressing / mapping (hardware controllers)
+
+        | Command | Arguments | Meaning |
+        |---------|-----------|---------|
+        | `hw_map` | `<instance> <symbol> <actuatorUri> <min:float> <max:float> <steps:int> <label> <tempo:True\|False> <dividers> <page> <subpage> <group> <feedback:0\|1> <coloured:0\|1> <momentary:int>` | A control port is assigned to an HMI/Control Chain/virtual (`/bpm`) actuator. `dividers` is a Python-list-like string (single quotes) or `null`. `page`, `subpage`, `group` are `null` or values. Virtual and Control Chain addressings send fixed values for the unused fields (`null`, `1`/feedback, `0`). |
+        | `midi_map` | `<instance> <symbol> <channel:int> <control:int> <min:float> <max:float>` | A MIDI CC is mapped to a port (also sent when the user MIDI-learns, preceded by a `param_set`). Invalid values (`channel<0`, `control<0`, `min>=max`) are ignored by the UI. |
+        | `cv_map` | `<instance> <symbol> <cvPortUri> <min:float> <max:float> <label> <operationalMode> <feedback:0\|1>` | A control port is controlled by a CV source. |
+        | `add_cv_port` | `<uri> <name> <operationalMode>` | A plugin CV output port is available as CV source. |
+        | `act_add` | `<base64(JSON Actuator)>` | New actuator metadata (e.g. Control Chain device connected). See schema `Actuator`. |
+        | `act_del` | `<actuatorUri>` | Actuator removed; any addressing using it is dropped on the backend. |
+        | `hw_add` | `<devUri> <label> <labelSuffix> <version>` | Control Chain device added. |
+        | `hw_rem` | `<devUri> <label> <version>` | Control Chain device removed. |
+        | `hw_con` | `<label> <version>` | Control Chain device connected. |
+        | `hw_dis` | `<label> <version>` | Control Chain device disconnected. |
+
+        ## Package management and integrations
+
+        | Command | Arguments | Meaning |
+        |---------|-----------|---------|
+        | `rescan` | `<base64(JSON PackageInstallResult)>` | Plugins were installed/updated through the SDK or `/rplsocket`; the UI refreshes its catalogue. |
+        | `load-pb-remote` | `<pedalboardId>` | A cloud page asked to open a cloud pedalboard (`/pedalboard/load_remote/…` or `/rpbsocket`). |
+        | `t3k-tone-selected` | `<instance> <code> <state> <toneId:int>` | TONE3000 tone picked (from `GET /effect/t3k/select/{instance}`). |
+        | `t3k-cancel` | `<instance>` | User closed the TONE3000 picker without choosing. |
+
+        ---
+        # Client → server messages
+
+        | Command | Arguments | Effect |
+        |---------|-----------|--------|
+        | `pong` | – | Answer to `ping`. Ignored. |
+        | `data_ready` | `<counter:int>` | Acknowledge flow control, see above. |
+        | `param_set` | `<instance>/<symbol> <value:float>` | Set a control port (symbol `:bypass`: `value >= 0.5` bypasses). Echoed as `param_set <instance> <symbol> <value>` to **other** sockets. Marks the pedalboard as modified. |
+        | `patch_get` | `<instance> <uri>` | Ask the plugin for the current value of a patch parameter; the answer arrives as `patch_set`. |
+        | `patch_set` | `<instance> <uri> <type:char> <value...>` | Set a patch parameter (types as in the server message). Echoed to other sockets as `patch_set <instance> <writable> <uri> <type> <value>`. |
+        | `plugin_pos` | `<instance> <x:float> <y:float>` | Persist a plugin block position. Echoed to other sockets as `plugin_pos <instance> <x:int> <y:int>`. |
+        | `pb_size` | `<width:float> <height:float>` | Canvas size of the pedalboard at 1:1 zoom (stored with the pedalboard). |
+        | `transport-rolling` | `<0\|1>` | Start/stop the transport. |
+        | `transport-bpm` | `<bpm:float>` | Set tempo. |
+        | `transport-bpb` | `<beatsPerBar:float>` | Set time signature numerator. |
+        | `link_enable` | – | Switch transport sync to Ableton Link. |
+        | `midi_clock_slave_enable` | – | Switch transport sync to MIDI clock (slave). |
+        | `set_internal_transport_source` | – | Switch transport sync back to internal. |
+        | `show_external_ui` | `<instance>` | Open the plugin's native (external) UI on the host; starts a 30 Hz keep-alive (`cpu_load`) towards mod-host. |
+
+        Unknown commands are logged and ignored. Malformed arguments raise an exception and close the socket.
+      responses:
+        "101":
+          description: Switching Protocols — the connection is now a WebSocket.
+        "400":
+          description: Not a WebSocket upgrade request.
+  /rpbsocket:
+    get:
+      tags: [WebSocket, Cloud]
+      operationId: connectRemotePedalboardWebSocket
+      summary: Cloud → device channel to open a pedalboard
+      description: |
+        Used by mod.audio pages to make the device load a pedalboard from the cloud.
+
+        **Origin check** (`check_origin`): scheme `http`/`https` and host `mod.audio`, `moddevices.com` or any of their
+        sub-domains.
+
+        | Direction | Frame | Meaning |
+        |-----------|-------|---------|
+        | client → server | `<pedalboardId>` (the whole text frame) | Forward the id to the first connected UI socket as `load-pb-remote <id>`. |
+        | server → client | `true` | Forwarded; the server closes the socket right after. |
+        | server → client | `false` | No UI is connected. |
+      responses:
+        "101":
+          description: Switching Protocols.
+        "403":
+          description: Origin not allowed.
+  /rplsocket:
+    get:
+      tags: [WebSocket, Cloud]
+      operationId: connectRemotePluginWebSocket
+      summary: Cloud → device channel to install plugins
+      description: |
+        Used by the MOD web store to push plugin packages to the device.
+
+        **Origin check:** scheme `http`/`https` and host `localhost:8010`, `mod.audio` or `*.mod.audio`.
+
+        | Direction | Frame | Meaning |
+        |-----------|-------|---------|
+        | client → server | *(empty frame)* | Ask for device compatibility information. |
+        | server → client | JSON `{"bin-compat": string, "platform": string, "version": string}` | Hardware binary compatibility id (`"Unknown"` if undetected), platform name and image version. |
+        | client → server | base64 text of a `.tar.gz` containing LV2 bundles | Install the package (saved as `remote.tar.gz` in the download temp dir). |
+        | server → client | JSON `PackageInstallResult` | Result of the installation. On success every main-UI socket also receives `rescan <base64(result)>`. |
+      responses:
+        "101":
+          description: Switching Protocols.
+        "403":
+          description: Origin not allowed.
+
+  # =====================================================================================================================
+  # System
+  # =====================================================================================================================
+  /system/info:
+    get:
+      tags: [System]
+      operationId: getSystemInfo
+      summary: Software/hardware information
+      responses:
+        "200":
+          description: System information (values are `"Unknown"` when not available).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SystemInfo'
+  /system/prefs:
+    get:
+      tags: [System]
+      operationId: getSystemPreferences
+      summary: System-level preferences stored as files under `/data`
+      description: >-
+        Reads small marker files (existence ⇒ boolean) or text files (contents ⇒ value). To change them use
+        `POST /system/exechange`.
+      responses:
+        "200":
+          description: Current values.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SystemPreferences'
+  /system/exechange:
+    post:
+      tags: [System]
+      operationId: systemExecuteChange
+      summary: Run a privileged maintenance action
+      description: |
+        Dispatches on `type`:
+
+        | `type` | Additional fields | Behaviour |
+        |--------|-------------------|-----------|
+        | `command` | `cmd` | `reboot` – resets the HMI and reboots the device; `restore` – restores the factory system (HMI restore); `backup-export <data:0\|1>,<pedalboards:0\|1>` – runs `mod-backup backup [-d] [-p]` and answers `{ok, error}`; `backup-import <data>,<pedalboards>` – runs `mod-backup restore [-d] [-p]`, answers `{ok, error}` and restarts JACK. Unknown commands → `false`. |
+        | `filecreate` | `path`, `create` | Creates (`1`) or removes (`0`) the marker file `/data/<path>`. `path` ∈ `autorestart-hmi`, `jack-mono-copy`, `jack-sync-mode`, `separate-spdif-outs`. Other paths → `false`. |
+        | `filewrite` | `path`, `content` | Writes `/data/<path>` (an empty content deletes it). `path` ∈ `bluetooth/name`, `jack-buffer-size`. Other paths → `false`. |
+        | `service` | `name`, `enable`, `inverted`, `persistent` | Starts/stops a systemd unit. `name` ∈ `hmi-update`, `mod-peakmeter`, `mod-sdk`, `netmanager` (the latter maps to `jack-netmanager`). With `persistent=1` it also creates/removes `/data/(enable\|disable)-<name>` (`inverted` chooses `disable-`). |
+
+        Every successful path ends with a filesystem `sync` and answers `true`, except where noted.
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/SystemExechangeRequest'
+      responses:
+        "200":
+          description: A boolean, or `{ok, error}` for the `backup-*` commands.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: boolean
+                  - $ref: '#/components/schemas/OkErrorResult'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+  /system/cleanup:
+    post:
+      tags: [System]
+      operationId: systemCleanup
+      summary: Delete user data selectively (factory-reset style)
+      description: |
+        Deletes the selected data, optionally resets the HMI EEPROM and restarts services (JACK is restarted when
+        pedalboards or plugins are removed; `mod-ui` always restarts). `hmiSettings` is ignored on devices whose
+        hardware descriptor has no `hmi_eeprom`. If nothing is selected → `{ok:false,error:"Nothing to delete"}`.
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [banks, favorites, hmiSettings, licenseKeys, pedalboards, plugins]
+              properties:
+                banks: { $ref: '#/components/schemas/IntBoolean' }
+                favorites: { $ref: '#/components/schemas/IntBoolean' }
+                hmiSettings: { $ref: '#/components/schemas/IntBoolean' }
+                licenseKeys: { $ref: '#/components/schemas/IntBoolean' }
+                pedalboards: { $ref: '#/components/schemas/IntBoolean' }
+                plugins: { $ref: '#/components/schemas/IntBoolean' }
+      responses:
+        "200":
+          description: Result. The server restarts shortly after answering when `ok` is true.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OkErrorResult'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+  /ping:
+    get:
+      tags: [System]
+      operationId: ping
+      summary: Check HMI connectivity and poke WebSocket clients
+      description: >-
+        Pings the HMI (waits up to 5 s; a timeout counts as online) and broadcasts `ping` over the main WebSocket,
+        to which each browser must answer `pong`. Used as the heartbeat of the UI's network-status indicator.
+      responses:
+        "200":
+          description: HMI round trip.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ihm_online, ihm_time]
+                properties:
+                  ihm_online:
+                    type: boolean
+                    description: Whether the HMI answered (always `false` without an initialised HMI).
+                  ihm_time:
+                    type: integer
+                    description: Round trip in ms (minimum 1 when online, 0 when offline).
+  /hello:
+    get:
+      tags: [Cloud]
+      operationId: hello
+      summary: Discovery probe for cloud pages
+      description: >-
+        Lets mod.audio pages detect a device (CORS enabled for `mod.audio`, `moddevices.com` and their sub-domains)
+        and whether a UI is currently open.
+      responses:
+        "200":
+          description: Device presence.
+          headers:
+            Access-Control-Allow-Origin:
+              $ref: '#/components/headers/CorsAllowOrigin'
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [online, version]
+                properties:
+                  online:
+                    type: boolean
+                    description: True when at least one UI WebSocket is connected.
+                  version:
+                    type: [string, "null"]
+                    description: Image version, `null` on development setups.
+  /truebypass/{channel}/{bypassed}:
+    get:
+      tags: [System]
+      operationId: setTrueBypass
+      summary: Set hardware true-bypass of one channel
+      description: Changes state; the new state is broadcast as `truebypass` over the main WebSocket.
+      parameters:
+        - name: channel
+          in: path
+          required: true
+          schema: { type: string, enum: [Left, Right] }
+        - name: bypassed
+          in: path
+          required: true
+          schema: { type: string, enum: ["true", "false"] }
+      responses:
+        "200":
+          $ref: '#/components/responses/BooleanResult'
+  /set_buffersize/{size}:
+    post:
+      tags: [System]
+      operationId: setBufferSize
+      summary: Change the JACK buffer size
+      description: On a real device the value is also persisted in `/data/jack-buffer-size`. A `bufsize` frame is broadcast by the JACK callback.
+      parameters:
+        - name: size
+          in: path
+          required: true
+          schema: { type: integer, enum: [128, 256] }
+      responses:
+        "200":
+          description: Applied size.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, size]
+                properties:
+                  ok: { type: boolean, description: "`true` when the engine reports the requested size." }
+                  size: { type: integer, description: "Size actually in use." }
+  /reset_xruns/:
+    post:
+      tags: [System]
+      operationId: resetXruns
+      summary: Reset the JACK xrun counter
+      responses:
+        "200":
+          $ref: '#/components/responses/BooleanResult'
+  /switch_cpu_freq/:
+    post:
+      tags: [System]
+      operationId: switchCpuFrequency
+      summary: Cycle to the next available CPU frequency
+      description: Linux `cpufreq` sysfs; wraps around to the lowest frequency. Returns `false` when the current frequency is unknown.
+      responses:
+        "200":
+          $ref: '#/components/responses/BooleanResult'
+  /save_user_id/:
+    post:
+      tags: [System]
+      operationId: saveUserId
+      summary: Store the user's name and e-mail
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [name, email]
+              properties:
+                name: { type: string }
+                email: { type: string }
+      responses:
+        "200":
+          $ref: '#/components/responses/BooleanResult'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+  /config/set:
+    post:
+      tags: [System]
+      operationId: setUserPreference
+      summary: Persist one UI preference
+      description: >-
+        Stores `key` → `value` in the preferences JSON file (atomic write). Values are saved as received
+        (strings; the frontend sends e.g. `"on"`, `"true"`). Keys used by the bundled UI include `dev-mode`,
+        `plugins-folded`, `pb-view-mode`, `cloud-terms-accepted`, `t3k-api-key`. The complete preference set is
+        injected into the pages as `preferences`.
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [key, value]
+              properties:
+                key: { type: string }
+                value: { type: string }
+      responses:
+        "200":
+          $ref: '#/components/responses/BooleanResult'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+  /favorites/add:
+    post:
+      tags: [Plugins]
+      operationId: addFavoritePlugin
+      summary: Mark a plugin as favourite
+      description: Returns `false` when it already is. The list is injected into the index page as `favorites`.
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [uri]
+              properties:
+                uri: { type: string, description: "Plugin LV2 URI." }
+      responses:
+        "200":
+          $ref: '#/components/responses/BooleanResult'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+  /favorites/remove:
+    post:
+      tags: [Plugins]
+      operationId: removeFavoritePlugin
+      summary: Remove a plugin from the favourites
+      description: Returns `false` when it was not a favourite.
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [uri]
+              properties:
+                uri: { type: string }
+      responses:
+        "200":
+          $ref: '#/components/responses/BooleanResult'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+
+  # =====================================================================================================================
+  # Updates
+  # =====================================================================================================================
+  /update/download/:
+    post:
+      tags: [Updates]
+      operationId: uploadOsUpdate
+      summary: Upload a MOD OS update image
+      description: |
+        Streams the request body (up to 200 MiB, or `expected_size` bytes) to disk and moves it to the OS update
+        location (`/data/<update file>`). The frontend first downloads the image from the cloud as a blob and then POSTs it here.
+        Follow with `POST /update/begin`.
+      parameters:
+        - name: expected_size
+          in: query
+          required: false
+          schema: { type: integer, minimum: 0 }
+          description: Maximum body size in bytes (default 209715200).
+        - name: body_timeout
+          in: query
+          required: false
+          schema: { type: number }
+          description: Seconds allowed to receive the body.
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        "200":
+          description: Stored.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UploadResultTrue'
+  /update/begin:
+    post:
+      tags: [Updates]
+      operationId: beginOsUpdate
+      summary: Start installing the uploaded OS update
+      description: Creates the boot-restore helper file and asks the HMI to restore/reboot. `false` when no update was uploaded.
+      responses:
+        "200":
+          $ref: '#/components/responses/BooleanResult'
+  /controlchain/download/:
+    post:
+      tags: [Updates]
+      operationId: uploadControlChainFirmware
+      summary: Upload a Control Chain device firmware
+      description: >-
+        Stores the raw body as `/tmp/cc-firmware.bin`. The actual flashing is performed by an external process that
+        signals completion with `SIGUSR1`, which results in a `cc-device-updated` WebSocket frame.
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        "200":
+          description: Stored.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UploadResultTrue'
+  /controlchain/cancel/:
+    post:
+      tags: [Updates]
+      operationId: cancelControlChainUpdate
+      summary: Discard an uploaded Control Chain firmware
+      description: '`false` when no firmware file exists.'
+      responses:
+        "200":
+          $ref: '#/components/responses/BooleanResult'
+
+  # =====================================================================================================================
+  # Plugins
+  # =====================================================================================================================
+  /effect/list:
+    get:
+      tags: [Plugins]
+      operationId: listPlugins
+      summary: All installed plugins (summary)
+      description: Triggers a short scan of all LV2 plugins on first use. Use `/effect/get` for full details.
+      responses:
+        "200":
+          description: Plugin summaries.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PluginSummary'
+  /effect/get:
+    get:
+      tags: [Plugins]
+      operationId: getPlugin
+      summary: Full description of one plugin
+      description: >-
+        Cacheable for a year; clients bust the cache with `version` and `plugin_version`, which the server ignores.
+      parameters:
+        - $ref: '#/components/parameters/PluginUri'
+        - name: version
+          in: query
+          required: false
+          schema: { type: string }
+          description: Cache buster (UI/image version). Ignored.
+        - name: plugin_version
+          in: query
+          required: false
+          schema: { type: string }
+          description: Cache buster (plugin version `minor.micro.release.builder`). Ignored.
+      responses:
+        "200":
+          description: Plugin information.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheForever'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PluginInfo'
+        "404":
+          $ref: '#/components/responses/NotFound'
+  /effect/get_non_cached:
+    get:
+      tags: [Plugins]
+      operationId: getPluginNonCached
+      summary: Volatile plugin data (license state and presets)
+      description: The part of the plugin description that changes at run time and therefore must not be cached.
+      parameters:
+        - $ref: '#/components/parameters/PluginUri'
+      responses:
+        "200":
+          description: Volatile data.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NonCachedPluginInfo'
+        "404":
+          $ref: '#/components/responses/NotFound'
+  /effect/bulk/:
+    post:
+      tags: [Plugins]
+      operationId: getPluginsBulk
+      summary: Full description of several plugins
+      description: Unknown URIs are silently skipped. The trailing slash is optional.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items: { type: string, description: "Plugin LV2 URI." }
+      responses:
+        "200":
+          description: Map of URI → plugin information.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties:
+                  $ref: '#/components/schemas/PluginInfo'
+        "501":
+          description: '`Content-Type` is not `application/json`.'
+          content:
+            text/html:
+              schema: { type: string }
+  /effect/install/:
+    post:
+      tags: [Plugins]
+      operationId: installPluginPackage
+      summary: Install a plugin package
+      description: |
+        The body is a gzipped tarball with one or more LV2 bundles. The bundles are unpacked, existing bundles with the
+        same directory name are replaced, the lilv world is updated and pedalboard/bank caches are invalidated.
+        The frontend downloads the file from the cloud and uploads it here (class `SimpleTransference`).
+        Unlike `/sdk/install/`, no `rescan` broadcast is sent: the UI refreshes its list from this response.
+      requestBody:
+        required: true
+        content:
+          application/x-tar+gzip:
+            schema: { type: string, format: binary }
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        "200":
+          description: Installation outcome.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, result]
+                properties:
+                  ok:
+                    type: boolean
+                    description: Upload accepted (not necessarily installed — check `result.ok`).
+                  result:
+                    $ref: '#/components/schemas/PackageInstallResult'
+  /package/uninstall:
+    post:
+      tags: [Plugins]
+      operationId: uninstallPackages
+      summary: Remove installed bundles
+      description: >-
+        Removes the LV2 bundles from the host, deletes their directories (must be below `LV2_PLUGIN_DIR`), removes them
+        from favourites and re-saves banks without now-broken pedalboards.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items: { type: string, description: "Absolute bundle path." }
+      responses:
+        "200":
+          description: Outcome.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PackageUninstallResult'
+  /effect/image/{kind}.png:
+    get:
+      tags: [Plugins]
+      operationId: getPluginImage
+      summary: Plugin screenshot or thumbnail
+      description: Falls back to the default images when the plugin does not ship one. Cached for a year.
+      parameters:
+        - name: kind
+          in: path
+          required: true
+          schema: { type: string, enum: [screenshot, thumbnail] }
+        - $ref: '#/components/parameters/PluginUri'
+        - name: v
+          in: query
+          required: false
+          schema: { type: string }
+          description: Cache buster.
+      responses:
+        "200":
+          description: PNG image.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheForever'
+          content:
+            image/png:
+              schema: { type: string, format: binary }
+        "404":
+          $ref: '#/components/responses/NotFound'
+  /effect/file/{prop}:
+    get:
+      tags: [Plugins]
+      operationId: getPluginGuiFile
+      summary: A file of the plugin's modgui
+      description: |
+        `prop` selects a key of the plugin's `gui` description (`iconTemplate`, `settingsTemplate`, `stylesheet`,
+        `javascript`, `screenshot`, `thumbnail`, `documentation`, ...). The first four are always served as
+        `text/plain; charset=UTF-8`. The special value `custom` serves an arbitrary file below the GUI resources
+        directory named by `filename` (`.wasm` files get `application/wasm`).
+      parameters:
+        - name: prop
+          in: path
+          required: true
+          schema:
+            type: string
+            examples: [iconTemplate, settingsTemplate, stylesheet, javascript, documentation, custom]
+        - $ref: '#/components/parameters/PluginUri'
+        - name: filename
+          in: query
+          required: false
+          description: Required when `prop` is `custom`.
+          schema: { type: string }
+        - name: v
+          in: query
+          required: false
+          schema: { type: string }
+          description: Cache buster (plugin version).
+        - name: r
+          in: query
+          required: false
+          schema: { type: string }
+          description: Cache buster (UI release).
+      responses:
+        "200":
+          description: File contents.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheForever'
+          content:
+            '*/*':
+              schema: { type: string, format: binary }
+        "404":
+          $ref: '#/components/responses/NotFound'
+  /effect/t3k/select/{instance}:
+    get:
+      tags: [TONE3000]
+      operationId: tone3000SelectCallback
+      summary: TONE3000 tone-selection redirect target
+      description: |
+        The pedalboard UI opens the TONE3000 picker in a pop-up and passes this URL as the callback. When the user
+        finishes, TONE3000 redirects the pop-up here. The server does not return data; it relays the outcome to the main UI
+        through the WebSocket (`t3k-tone-selected <instance> <code> <state> <toneId>` or `t3k-cancel <instance>`).
+        The `state` CSRF check is currently disabled in the server.
+      parameters:
+        - $ref: '#/components/parameters/InstancePath'
+        - name: code
+          in: query
+          required: false
+          schema: { type: string }
+          description: OAuth authorization code to exchange for tokens (absent if the user closed the window before signing in).
+        - name: state
+          in: query
+          required: false
+          schema: { type: string }
+          description: Opaque state echoed from the request.
+        - name: tone_id
+          in: query
+          required: false
+          schema: { type: integer, default: 0 }
+        - name: canceled
+          in: query
+          required: false
+          description: >-
+            Any non-empty value (including `0` or `false`) is treated as *true*, because the server applies
+            `bool()` to the raw string.
+          schema: { type: string }
+      responses:
+        "200":
+          description: Empty body.
+          content:
+            application/json:
+              schema: { type: string, maxLength: 0 }
+
+  # =====================================================================================================================
+  # Pedalboard graph (live editing)
+  # =====================================================================================================================
+  /effect/add/{instance}:
+    get:
+      tags: [Pedalboard graph]
+      operationId: addPlugin
+      summary: Load a plugin into the running pedalboard
+      description: |
+        Creates the plugin (enabled, i.e. not bypassed) in mod-host and marks the pedalboard as modified (a screenshot is
+        scheduled on the next save). Other sockets receive an `add` frame from the host layer. The response is the
+        plugin description so the UI can build its block without another request.
+      parameters:
+        - $ref: '#/components/parameters/InstancePath'
+        - $ref: '#/components/parameters/PluginUri'
+        - name: x
+          in: query
+          required: false
+          schema: { type: number, default: 0 }
+          description: Horizontal position in the canvas.
+        - name: y
+          in: query
+          required: false
+          schema: { type: number, default: 0 }
+          description: Vertical position in the canvas.
+      responses:
+        "200":
+          description: Plugin information, or `false` when the host refused to create it.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/PluginInfo'
+                  - type: boolean
+                    const: false
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "404":
+          $ref: '#/components/responses/NotFound'
+  /effect/remove/{instance}:
+    get:
+      tags: [Pedalboard graph]
+      operationId: removePlugin
+      summary: Remove a plugin from the running pedalboard
+      description: Also removes its connections; connected sockets receive `disconnect` and `remove` frames.
+      parameters:
+        - $ref: '#/components/parameters/InstancePath'
+      responses:
+        "200":
+          $ref: '#/components/responses/BooleanResult'
+  /effect/connect/{port_from},{port_to}:
+    get:
+      tags: [Pedalboard graph]
+      operationId: connectPorts
+      summary: Connect an output port to an input port
+      description: Ports are `<instance>/<symbol>` or hardware ports (`/graph/capture_1`, `/graph/playback_1`, ...). A `connect` frame is broadcast.
+      parameters:
+        - name: port_from
+          in: path
+          required: true
+          schema: { type: string, examples: ["/graph/capture_1"] }
+        - name: port_to
+          in: path
+          required: true
+          schema: { type: string, examples: ["/graph/Gain/in"] }
+      responses:
+        "200":
+          $ref: '#/components/responses/BooleanResult'
+  /effect/disconnect/{port_from},{port_to}:
+    get:
+      tags: [Pedalboard graph]
+      operationId: disconnectPorts
+      summary: Remove a connection
+      description: A `disconnect` frame is broadcast.
+      parameters:
+        - name: port_from
+          in: path
+          required: true
+          schema: { type: string }
+        - name: port_to
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          $ref: '#/components/responses/BooleanResult'
+  /effect/parameter/address/{port}:
+    post:
+      tags: [Pedalboard graph]
+      operationId: addressParameter
+      summary: Assign a control port to a hardware actuator (or remove the assignment)
+      description: |
+        `port` is `<instance>/<symbol>`; `:bypass`, `:presets` and pedalboard-level ports are allowed. `uri` selects the
+        actuator: an HMI/Control Chain URI, a MIDI/CV pseudo-URI, `/bpm`, or the special value `null` which removes the
+        existing addressing. Resulting mappings are broadcast as `hw_map`, `midi_map` or `cv_map` frames.
+        The call returns `false` when the actuator cannot be used (not available, already full, wrong type).
+      parameters:
+        - name: port
+          in: path
+          required: true
+          schema: { type: string, examples: ["/graph/Gain/gain"] }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddressingRequest'
+      responses:
+        "200":
+          $ref: '#/components/responses/BooleanResult'
+        "404":
+          description: '`uri` is missing from the body.'
+          content:
+            text/html:
+              schema: { type: string }
+  /effect/parameter/set/:
+    post:
+      tags: [Pedalboard graph]
+      operationId: reportParameterToHmi
+      summary: Mirror a UI parameter change on the hardware controller
+      description: |
+        Does **not** change the audio engine (use WebSocket `param_set` for that). It only tells the HMI/Control Chain
+        about the new value of an *addressed* parameter so the hardware display stays in sync. Waits up to 5 s. Returns
+        `true` immediately when the HMI is not initialised, and `true` also for non-addressed ports.
+        The body is a **JSON string** (not an object) `"<instance>/<symbol>/<value>"`, for example `"/graph/Gain/gain/3.5"`
+        or `"/pedalboard/:rolling/1"`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: string
+              examples: ["/graph/Gain/gain/3.5"]
+      responses:
+        "200":
+          $ref: '#/components/responses/BooleanResult'
+  /pedalboard/cv_addressing_plugin_port/add:
+    post:
+      tags: [Pedalboard graph]
+      operationId: addCvPluginPort
+      summary: Expose a plugin CV output as a CV addressing source
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [uri, name]
+              properties:
+                uri: { type: string, description: "CV port URI (`/cv/graph/<instance>/<symbol>`)." }
+                name: { type: string }
+      responses:
+        "200":
+          description: >-
+            Always `ok:true`. `operational_mode` is derived from the plugin port range: `+` unipolar positive,
+            `-` unipolar negative, `b` bipolar.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, operational_mode]
+                properties:
+                  ok: { type: boolean }
+                  operational_mode: { type: string }
+        "400":
+          $ref: '#/components/responses/BadRequest'
+  /pedalboard/cv_addressing_plugin_port/remove:
+    post:
+      tags: [Pedalboard graph]
+      operationId: removeCvPluginPort
+      summary: Withdraw a plugin CV output from the CV addressing sources
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [uri]
+              properties:
+                uri: { type: string }
+      responses:
+        "200":
+          $ref: '#/components/responses/BooleanResult'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+  /pedalboard/transport/set_sync_mode/{mode}:
+    post:
+      tags: [Pedalboard graph]
+      operationId: setTransportSyncMode
+      summary: Choose the transport clock source
+      description: Result is broadcast as a `transport` frame. The path segment keeps the slash that precedes it (`/none`, ...). Invalid modes answer `false`.
+      parameters:
+        - name: mode
+          in: path
+          required: true
+          schema: { type: string, enum: [none, midi_clock_slave, link] }
+      responses:
+        "200":
+          $ref: '#/components/responses/BooleanResult'
+
+  # =====================================================================================================================
+  # Presets
+  # =====================================================================================================================
+  /effect/preset/load/{instance}:
+    get:
+      tags: [Presets]
+      operationId: loadPreset
+      summary: Load a plugin preset
+      description: >-
+        Applies the preset, broadcasts `preset` and `param_set` frames and, if the HMI is up, updates its preset
+        selector (up to 10 s). Returns `false` on failure or timeout.
+      parameters:
+        - $ref: '#/components/parameters/InstancePath'
+        - name: uri
+          in: query
+          required: true
+          schema: { type: string, description: "Preset URI." }
+      responses:
+        "200":
+          $ref: '#/components/responses/BooleanResult'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+  /effect/preset/save_new/{instance}:
+    get:
+      tags: [Presets]
+      operationId: savePresetAsNew
+      summary: Save the current values as a new preset
+      description: Creates a new LV2 preset bundle below the user plugin directory and re-addresses the HMI preset selector.
+      parameters:
+        - $ref: '#/components/parameters/InstancePath'
+        - name: name
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          $ref: '#/components/responses/PresetSaveResult'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+  /effect/preset/save_replace/{instance}:
+    get:
+      tags: [Presets]
+      operationId: savePresetReplace
+      summary: Overwrite (and optionally rename) the current user preset
+      description: '`uri` must be the currently selected preset of the instance and `bundle` its existing bundle directory, otherwise `{ok:false}`.'
+      parameters:
+        - $ref: '#/components/parameters/InstancePath'
+        - name: uri
+          in: query
+          required: true
+          schema: { type: string, description: "URI of the preset being replaced." }
+        - name: bundle
+          in: query
+          required: true
+          schema: { type: string, description: "Absolute path of the preset bundle." }
+        - name: name
+          in: query
+          required: true
+          schema: { type: string, description: "New preset label." }
+      responses:
+        "200":
+          $ref: '#/components/responses/PresetSaveResult'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+  /effect/preset/delete/{instance}:
+    get:
+      tags: [Presets]
+      operationId: deletePreset
+      summary: Delete the currently selected user preset
+      description: On success a `preset <instance> null` frame is broadcast.
+      parameters:
+        - $ref: '#/components/parameters/InstancePath'
+        - name: uri
+          in: query
+          required: true
+          schema: { type: string }
+        - name: bundle
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          $ref: '#/components/responses/BooleanResult'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+
+  # =====================================================================================================================
+  # Pedalboards
+  # =====================================================================================================================
+  /pedalboard/list:
+    get:
+      tags: [Pedalboards]
+      operationId: listPedalboards
+      summary: All pedalboards (user and factory)
+      description: 'The pedalboard stored at the default path is always reported with title "Default" and `broken: false`.'
+      responses:
+        "200":
+          description: Pedalboard summaries.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PedalboardSummary'
+  /pedalboard/info/:
+    get:
+      tags: [Pedalboards]
+      operationId: getPedalboardInfo
+      summary: Full content of one pedalboard bundle
+      parameters:
+        - $ref: '#/components/parameters/BundlePath'
+      responses:
+        "200":
+          description: Pedalboard description.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PedalboardInfo'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+  /pedalboard/save:
+    post:
+      tags: [Pedalboards]
+      operationId: savePedalboard
+      summary: Save the running pedalboard
+      description: |
+        Saves the current graph, snapshots and addressings. A thumbnail is scheduled when the graph changed. The pedalboard
+        cache is refreshed (a new title also resets the pedalboard list cache). When the device has an HMI that
+        shows pedalboard names, it is updated too.
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [title, asNew]
+              properties:
+                title: { type: string }
+                asNew: { $ref: '#/components/schemas/IntBoolean' }
+      responses:
+        "200":
+          description: Result.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, bundlepath, title]
+                properties:
+                  ok: { type: boolean }
+                  bundlepath:
+                    type: [string, "null"]
+                    description: Bundle directory (`null` on failure).
+                  title:
+                    type: string
+                    description: Final title (made unique when it clashes with another user pedalboard).
+        "400":
+          $ref: '#/components/responses/BadRequest'
+  /pedalboard/load_bundle/:
+    post:
+      tags: [Pedalboards]
+      operationId: loadPedalboardBundle
+      summary: Load a pedalboard from disk
+      description: |
+        Loads the bundle into mod-host. All sockets receive `loading_start`, the new content and `loading_end`
+        (see the WebSocket section). The call does **not** remove what is currently loaded: the frontend first calls
+        `GET /reset` (which broadcasts `remove :all`) and only then this endpoint. For the empty default pedalboard it
+        sends `bundlepath=<default pedalboard>` and `isDefault=1`. Trailing slash is required.
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [bundlepath]
+              properties:
+                bundlepath: { type: string }
+                isDefault:
+                  allOf:
+                    - $ref: '#/components/schemas/IntBoolean'
+                  description: When `1`, loads it as the *default (untitled)* pedalboard (name and path are cleared).
+      responses:
+        "200":
+          description: Result.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, name]
+                properties:
+                  ok: { type: boolean, description: "`false` when the bundle does not exist." }
+                  name: { type: string, description: "Title of the loaded pedalboard." }
+        "400":
+          $ref: '#/components/responses/BadRequest'
+  /pedalboard/load_web/:
+    post:
+      tags: [Pedalboards]
+      operationId: loadPedalboardFromArchive
+      summary: Upload and load a pedalboard archive
+      description: >-
+        The body is a tar archive containing one `.pedalboard` directory (as downloaded from the cloud). It is extracted
+        to `/tmp/pedalboards` and loaded as if via `/pedalboard/load_bundle/`.
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+          application/x-tar+gzip:
+            schema: { type: string, format: binary }
+      responses:
+        "200":
+          description: Upload processed.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, result]
+                properties:
+                  ok: { type: boolean, const: true }
+                  result: { type: "null" }
+  /pedalboard/load_remote/{pedalboard_id}:
+    post:
+      tags: [Pedalboards, Cloud]
+      operationId: loadRemotePedalboard
+      summary: Ask the open UI to load a cloud pedalboard
+      description: |
+        Cross-origin entry point for mod.audio pages (CORS header set for `mod.audio`, `moddevices.com` and sub-domains).
+        The first connected UI receives `load-pb-remote <pedalboard_id>` over the main WebSocket and performs the download.
+        `false` when no UI is connected.
+      parameters:
+        - name: pedalboard_id
+          in: path
+          required: true
+          schema: { type: string, pattern: '^[A-Za-z0-9_/]+$' }
+      responses:
+        "200":
+          description: Forwarded or not.
+          headers:
+            Access-Control-Allow-Origin:
+              $ref: '#/components/headers/CorsAllowOrigin'
+          content:
+            application/json:
+              schema: { type: boolean }
+  /pedalboard/pack_bundle/:
+    get:
+      tags: [Pedalboards]
+      operationId: packPedalboardBundle
+      summary: Download a pedalboard as `.tar.gz`
+      description: >-
+        Packs the bundle with `tar`. If an audio recording exists the archive is `pedalboard+audio.tar.gz`, which
+        contains `pedalboard.tar.gz` and `audio.ogg`; otherwise just `pedalboard.tar.gz`. The `Content-Type` is not set
+        explicitly by the server.
+      parameters:
+        - $ref: '#/components/parameters/BundlePath'
+      responses:
+        "200":
+          description: Archive bytes.
+          content:
+            application/gzip:
+              schema: { type: string, format: binary }
+  /pedalboard/factorycopy/:
+    get:
+      tags: [Pedalboards]
+      operationId: copyFactoryPedalboard
+      summary: Copy a factory pedalboard into the user's library
+      description: The new bundle gets a unique title and directory name.
+      parameters:
+        - $ref: '#/components/parameters/BundlePath'
+        - name: title
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: The new pedalboard (`PedalboardInfo` plus `bundlepath`), or `false` when the source bundle does not exist.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - allOf:
+                      - $ref: '#/components/schemas/PedalboardInfo'
+                      - type: object
+                        properties:
+                          bundlepath: { type: string }
+                  - type: boolean
+                    const: false
+        "400":
+          $ref: '#/components/responses/BadRequest'
+  /pedalboard/remove/:
+    get:
+      tags: [Pedalboards]
+      operationId: removePedalboard
+      summary: Delete a user pedalboard
+      description: Deletes the bundle and removes it from all banks. `false` when it does not exist.
+      parameters:
+        - $ref: '#/components/parameters/BundlePath'
+      responses:
+        "200":
+          $ref: '#/components/responses/BooleanResult'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+  /pedalboard/image/{kind}.png:
+    get:
+      tags: [Pedalboards]
+      operationId: getPedalboardImage
+      summary: Pedalboard screenshot or thumbnail
+      parameters:
+        - name: kind
+          in: path
+          required: true
+          schema: { type: string, enum: [screenshot, thumbnail] }
+        - $ref: '#/components/parameters/BundlePath'
+        - name: tstamp
+          in: query
+          required: false
+          schema: { type: string }
+          description: Cache buster (thumbnail creation time).
+        - name: v
+          in: query
+          required: false
+          schema: { type: string }
+          description: Cache buster (pedalboard version).
+      responses:
+        "200":
+          description: PNG image.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheForever'
+          content:
+            image/png:
+              schema: { type: string, format: binary }
+        "404":
+          $ref: '#/components/responses/NotFound'
+  /pedalboard/image/generate:
+    get:
+      tags: [Pedalboards]
+      operationId: generatePedalboardImage
+      summary: Queue thumbnail generation and wait for it
+      description: Responds when the image is ready.
+      parameters:
+        - $ref: '#/components/parameters/BundlePath'
+      responses:
+        "200":
+          $ref: '#/components/responses/ImageJobResult'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+  /pedalboard/image/check:
+    get:
+      tags: [Pedalboards]
+      operationId: checkPedalboardImage
+      summary: Check thumbnail state
+      description: Cached for a year (the client adds `v`).
+      parameters:
+        - $ref: '#/components/parameters/BundlePath'
+        - name: v
+          in: query
+          required: false
+          schema: { type: string }
+          description: Cache buster.
+      responses:
+        "200":
+          description: State.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheForever'
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, ctime]
+                properties:
+                  status:
+                    type: integer
+                    enum: [-1, 0, 1]
+                    description: "`-1` no thumbnail, `0` generation queued/in progress, `1` available."
+                  ctime:
+                    type: string
+                    description: Creation time of the thumbnail (Unix seconds, one decimal) or `"0.0"`.
+        "400":
+          $ref: '#/components/responses/BadRequest'
+  /pedalboard/image/wait:
+    get:
+      tags: [Pedalboards]
+      operationId: waitPedalboardImage
+      summary: Wait for pending thumbnail jobs
+      description: 'Long request: answers once queued jobs for this bundle are finished.'
+      parameters:
+        - $ref: '#/components/parameters/BundlePath'
+      responses:
+        "200":
+          $ref: '#/components/responses/ImageJobResult'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+  /reset:
+    get:
+      tags: [Pedalboards]
+      operationId: resetPedalboard
+      summary: Start an empty, untitled pedalboard
+      description: >-
+        Clears the HMI and the host (all plugins, connections and addressings). Sockets receive `remove :all`.
+        The frontend calls this before every `POST /pedalboard/load_bundle/`. Also available as `/reset/`.
+      responses:
+        "200":
+          $ref: '#/components/responses/BooleanResult'
+
+  # =====================================================================================================================
+  # Snapshots
+  # =====================================================================================================================
+  /snapshot/save:
+    post:
+      tags: [Snapshots]
+      operationId: saveSnapshot
+      summary: Overwrite the current snapshot with the live state
+      responses:
+        "200":
+          $ref: '#/components/responses/BooleanResult'
+  /snapshot/saveas:
+    get:
+      tags: [Snapshots]
+      operationId: saveSnapshotAs
+      summary: Create a new snapshot from the live state
+      parameters:
+        - name: title
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: The new snapshot (title may be made unique).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, id, title]
+                properties:
+                  ok: { type: boolean }
+                  id: { type: [integer, "null"] }
+                  title: { type: string }
+        "400":
+          $ref: '#/components/responses/BadRequest'
+  /snapshot/rename:
+    get:
+      tags: [Snapshots]
+      operationId: renameSnapshot
+      summary: Rename a snapshot
+      parameters:
+        - $ref: '#/components/parameters/SnapshotId'
+        - name: title
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Result.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, title]
+                properties:
+                  ok: { type: boolean }
+                  title: { type: string, description: "Final name (unique)." }
+        "400":
+          $ref: '#/components/responses/BadRequest'
+  /snapshot/remove:
+    get:
+      tags: [Snapshots]
+      operationId: removeSnapshot
+      summary: Delete a snapshot
+      parameters:
+        - $ref: '#/components/parameters/SnapshotId'
+      responses:
+        "200":
+          $ref: '#/components/responses/BooleanResult'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+  /snapshot/list:
+    get:
+      tags: [Snapshots]
+      operationId: listSnapshots
+      summary: Snapshot names of the loaded pedalboard
+      responses:
+        "200":
+          description: Map of snapshot index to name (deleted indices are omitted). Keys are JSON strings.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: { type: string }
+                examples:
+                  - { "0": "Default", "1": "Solo" }
+  /snapshot/name:
+    get:
+      tags: [Snapshots]
+      operationId: getSnapshotName
+      summary: Name of one snapshot
+      description: Falls back to `Default` when the index is unknown.
+      parameters:
+        - $ref: '#/components/parameters/SnapshotId'
+      responses:
+        "200":
+          description: Name.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, name]
+                properties:
+                  ok: { type: boolean }
+                  name: { type: string }
+        "400":
+          $ref: '#/components/responses/BadRequest'
+  /snapshot/load:
+    get:
+      tags: [Snapshots]
+      operationId: loadSnapshot
+      summary: Apply a snapshot
+      description: >-
+        Interrupts any snapshot/preset load in progress. Sockets receive `param_set`, `preset`, `patch_set`, `pedal_snapshot` and
+        connection frames while it is applied.
+      parameters:
+        - $ref: '#/components/parameters/SnapshotId'
+      responses:
+        "200":
+          $ref: '#/components/responses/BooleanResult'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+
+  # =====================================================================================================================
+  # Banks
+  # =====================================================================================================================
+  /banks:
+    get:
+      tags: [Banks]
+      operationId: listBanks
+      summary: User banks with full pedalboard info
+      description: >-
+        Pedalboards that no longer exist or are broken (missing plugins) are silently dropped, and the cleaned list is saved.
+        Also available as `/banks/`.
+      responses:
+        "200":
+          description: Banks.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Bank'
+  /banks/save:
+    post:
+      tags: [Banks]
+      operationId: saveBanks
+      summary: Replace all user banks
+      description: Also available as `/banks/save/`. Body is the JSON document, sent with any content type.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                $ref: '#/components/schemas/BankInput'
+      responses:
+        "200":
+          $ref: '#/components/responses/BooleanResult'
+
+  # =====================================================================================================================
+  # MIDI
+  # =====================================================================================================================
+  /jack/get_midi_devices:
+    get:
+      tags: [MIDI]
+      operationId: getMidiDevices
+      summary: Hardware MIDI devices and the current routing mode
+      responses:
+        "200":
+          description: Devices.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MidiDevices'
+  /jack/set_midi_devices:
+    post:
+      tags: [MIDI]
+      operationId: setMidiDevices
+      summary: Choose the enabled MIDI devices
+      description: >-
+        Adds/removes JACK ports as needed. The UI is told through `add_hw_port`, `remove_hw_port` and `disconnect` frames.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [devs, midiAggregatedMode, midiLoopback]
+              properties:
+                devs:
+                  type: array
+                  items: { type: string }
+                  description: Ids from `devList` that must be enabled.
+                midiAggregatedMode:
+                  type: boolean
+                  description: Merge all devices into a single in/out pair.
+                midiLoopback:
+                  type: boolean
+                  description: Enable the virtual MIDI loopback port.
+      responses:
+        "200":
+          $ref: '#/components/responses/BooleanResult'
+
+  # =====================================================================================================================
+  # Files
+  # =====================================================================================================================
+  /files/list:
+    get:
+      tags: [Files]
+      operationId: listUserFiles
+      summary: List user files by type
+      description: |
+        Walks the user files directory (`/data/user-files/<type folder>`) recursively and returns files whose extension
+        matches the type.
+
+        | `types` | Folder | Extensions |
+        |---------|--------|------------|
+        | `audioloop` | Audio Loops | common audio formats (libsndfile + ffmpeg) |
+        | `audiorecording` | Audio Recordings | common audio formats |
+        | `audiosample` | Audio Samples | common audio formats |
+        | `audiotrack` | Audio Tracks | common audio formats |
+        | `cabsim` | Speaker Cabinets IRs | `.aif .aifc .aiff .flac .w64 .wav` |
+        | `ir` | Reverb IRs | `.aif .aifc .aiff .flac .w64 .wav` |
+        | `h2drumkit` | Hydrogen Drumkits | `.h2drumkit` |
+        | `midiclip` | MIDI Clips | `.mid .midi` |
+        | `midisong` | MIDI Songs | `.mid .midi` |
+        | `sf2` | SF2 Instruments | `.sf2 .sf3` |
+        | `sfz` | SFZ Instruments | `.sfz` |
+        | `aidadspmodel` | Aida DSP Models | `.aidax .json` |
+        | `nammodel` | NAM Models | `.nam` |
+        | `easyspinprog` | Easy Spin Programs | `.json` |
+
+        Unknown types are ignored. Results are sorted by full path.
+      parameters:
+        - name: types
+          in: query
+          required: true
+          description: Comma separated list of file types.
+          schema:
+            type: string
+            examples: ["nammodel,cabsim"]
+      responses:
+        "200":
+          description: Files found.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, files]
+                properties:
+                  ok: { type: boolean, const: true }
+                  files:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/UserFile'
+        "501":
+          description: '`types` is missing.'
+          content:
+            text/html:
+              schema: { type: string }
+  /files/upload:
+    post:
+      tags: [Files]
+      operationId: uploadUserFile
+      summary: Upload a user file (IR, NAM/AIDA model, ...)
+      description: |
+        The raw file is the request body. Destination, type and conflict handling are controlled by the
+        `X-Upload-Config` header. Names are sanitised (ASCII only, unsafe characters become `-`), and an existing file name
+        gets a ` 01`, ` 02`, ... suffix. Also available as `/files/upload/`.
+
+        If the file type is not given it is derived from the extension: `.nam` → `nammodel`, `.wav` → `cabsim`,
+        `.aidax` → `aidadspmodel`, anything else → `ir`. Unknown types discard the upload and the response has
+        `result: null`.
+      parameters:
+        - name: X-Upload-Config
+          in: header
+          required: false
+          description: URL-encoded JSON of `UploadConfig`.
+          schema:
+            type: string
+            contentMediaType: application/json
+            contentSchema:
+              $ref: '#/components/schemas/UploadConfig'
+        - name: Authorization
+          in: header
+          required: false
+          description: Sent by the frontend (`MOD <token>`) but ignored by this server.
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+          audio/wav:
+            schema: { type: string, format: binary }
+      responses:
+        "200":
+          description: Stored.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, result]
+                properties:
+                  ok: { type: boolean, const: true }
+                  result:
+                    oneOf:
+                      - $ref: '#/components/schemas/UserFile'
+                      - type: "null"
+
+  # =====================================================================================================================
+  # Recording
+  # =====================================================================================================================
+  /recording/start:
+    get:
+      tags: [Recording]
+      operationId: startRecording
+      summary: Start capturing the audio output
+      description: Stops playback first.
+      responses:
+        "200":
+          $ref: '#/components/responses/BooleanResult'
+  /recording/stop:
+    get:
+      tags: [Recording]
+      operationId: stopRecording
+      summary: Stop capturing
+      description: The recording is kept in memory for playback/download.
+      responses:
+        "200":
+          $ref: '#/components/responses/BooleanResult'
+  /recording/reset:
+    get:
+      tags: [Recording]
+      operationId: resetRecording
+      summary: Discard the recording
+      responses:
+        "200":
+          $ref: '#/components/responses/BooleanResult'
+  /recording/play/{action}:
+    get:
+      tags: [Recording]
+      operationId: controlRecordingPlayback
+      summary: Play, stop and wait for the end of the recording
+      description: |
+        * `start` – mutes the live signal and plays the recording; answers `true` immediately.
+        * `stop` – stops playback; answers `true`.
+        * `wait` – **long poll**: the request stays open until playback ends (then answers `true`) or until another `wait` request replaces it
+          (the older one is released with `true`). The UI keeps one `wait` request open after `start`.
+      parameters:
+        - name: action
+          in: path
+          required: true
+          schema: { type: string, enum: [start, wait, stop] }
+      responses:
+        "200":
+          $ref: '#/components/responses/BooleanResult'
+  /recording/download:
+    get:
+      tags: [Recording]
+      operationId: downloadRecording
+      summary: Get the recording
+      responses:
+        "200":
+          description: '`ok` is false when there is no recording.'
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, audio]
+                properties:
+                  ok: { type: boolean }
+                  audio:
+                    type: string
+                    contentEncoding: base64
+                    description: Base64 of an Ogg file (empty string when `ok` is false).
+
+  # =====================================================================================================================
+  # Cloud helpers
+  # =====================================================================================================================
+  /auth/nonce:
+    post:
+      tags: [Cloud]
+      operationId: createAuthMessage
+      summary: Sign a cloud nonce with the device key
+      description: |
+        First step of device authentication against the MOD cloud. The server signs the nonce with the device key and
+        encrypts `{nonce, device_tag, device_uid, image_version, signature}` with the cloud's public key. Returns an empty
+        object when the image has no cryptographic material. Also available as `/auth/nonce/`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [nonce]
+              properties:
+                nonce: { type: string }
+      responses:
+        "200":
+          description: Encrypted message to forward to the cloud (`POST <cloud>/devices/nonce`), or `{}`.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    required: [message]
+                    properties:
+                      message: { type: string, description: "Base64 of the encrypted payload." }
+                  - type: object
+                    maxProperties: 0
+  /auth/token:
+    post:
+      tags: [Cloud]
+      operationId: decryptAuthToken
+      summary: Decrypt the access token returned by the cloud
+      description: |
+        Second step. The body is the JSON the cloud answered with (`{"message": <base64>, "signature": <base64>}`).
+        The server decrypts it with the device key and verifies the cloud signature (for tokens of version ≥ 2.3.2).
+        The token is returned only; it is never stored. Failures raise `500`.
+        Also available as `/auth/token/`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message]
+              properties:
+                message: { type: string }
+                signature: { type: string }
+      responses:
+        "200":
+          description: Token.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [access_token]
+                properties:
+                  access_token: { type: string, description: "JWT used as `Authorization MOD <token>`." }
+        "500":
+          $ref: '#/components/responses/ServerError'
+  /tokens/get:
+    get:
+      tags: [Cloud]
+      operationId: getStoredTokens
+      summary: Read stored cloud tokens
+      responses:
+        "200":
+          description: The saved fields plus `ok` (true when `user_id`, `access_token` and `refresh_token` exist). Only `{ok:false}` when nothing is stored.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok]
+                properties:
+                  ok: { type: boolean }
+                  user_id: { type: string }
+                  access_token: { type: string }
+                  refresh_token: { type: string }
+                additionalProperties: true
+  /tokens/save:
+    post:
+      tags: [Cloud]
+      operationId: saveStoredTokens
+      summary: Store cloud tokens on the device
+      description: >-
+        Persists the JSON body to `tokens.conf` in the data directory after dropping `expires_in_days` (which must be
+        present, otherwise `500`). Answers `true`. Also available as `/tokens/save/`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [expires_in_days]
+              properties:
+                user_id: { type: string }
+                access_token: { type: string }
+                refresh_token: { type: string }
+                expires_in_days: { type: number }
+              additionalProperties: true
+      responses:
+        "200":
+          description: >-
+            Saved; the body is `true`. (The handler is wrapped by `@jsoncall`, which would answer 204 for a `None`
+            return value, but the handler writes `true` itself before returning, so the response is already complete.)
+          content:
+            application/json:
+              schema: { type: boolean }
+        "500":
+          $ref: '#/components/responses/ServerError'
+  /tokens/delete:
+    get:
+      tags: [Cloud]
+      operationId: deleteStoredTokens
+      summary: Forget the stored cloud tokens
+      responses:
+        "200":
+          $ref: '#/components/responses/BooleanResult'
+
+  # =====================================================================================================================
+  # SDK
+  # =====================================================================================================================
+  /sdk/install/:
+    post:
+      tags: [SDK]
+      operationId: sdkInstallPackage
+      summary: Install a plugin package (SDK)
+      description: |
+        Multipart upload where the `package` part contains the **base64** text of a `.tar.gz` with LV2 bundles.
+        CORS: the origin is accepted when it uses `http`, or its host ends with `:9000` or `.mod.audio`.
+        On success all UI sockets receive `rescan <base64(result)>`. Also available as `/sdk/install`.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [package]
+              properties:
+                package:
+                  type: string
+                  contentEncoding: base64
+                  description: File part; its body is base64 text of the tarball.
+      responses:
+        "200":
+          description: Installation outcome.
+          headers:
+            Access-Control-Allow-Origin:
+              $ref: '#/components/headers/CorsAllowOrigin'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PackageInstallResult'
+  /sdk/update:
+    post:
+      tags: [SDK]
+      operationId: sdkUpdateBundle
+      summary: Refresh one bundle in place
+      description: >-
+        Reloads a bundle after the developer rebuilt it. On success all UI sockets receive `rescan` with
+        `removed:[uri]`, `installed:[uri]`. Same CORS policy as `/sdk/install/`.
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [bundle, uri]
+              properties:
+                bundle: { type: string, description: "Absolute bundle path." }
+                uri: { type: string, description: "Plugin URI." }
+      responses:
+        "200":
+          description: Result.
+          headers:
+            Access-Control-Allow-Origin:
+              $ref: '#/components/headers/CorsAllowOrigin'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OkErrorResult'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+
+components:
+  parameters:
+    Version:
+      name: v
+      in: query
+      required: false
+      description: >-
+        UI version used for cache busting. Required in practice: requests without it, or with a stale value, are
+        redirected (see "Version redirect rules").
+      schema:
+        type: string
+    PluginUri:
+      name: uri
+      in: query
+      required: true
+      description: LV2 URI of the plugin.
+      schema:
+        type: string
+        examples: ["http://moddevices.com/plugins/mod-devel/Gain"]
+    BundlePath:
+      name: bundlepath
+      in: query
+      required: true
+      description: Absolute path of the `.pedalboard` bundle directory.
+      schema:
+        type: string
+        examples: ["/root/.pedalboards/My_Board.pedalboard"]
+    InstancePath:
+      name: instance
+      in: path
+      required: true
+      description: >-
+        Plugin instance, e.g. `graph/Gain` (the routing regex also accepts the form with a leading slash,
+        `/graph/Gain`, which is how the frontend builds URLs). Allowed characters: `A-Za-z0-9_/`.
+      allowReserved: true
+      schema:
+        type: string
+        pattern: '^/?[A-Za-z0-9_/]+$'
+        examples: [graph/Gain]
+    SnapshotId:
+      name: id
+      in: query
+      required: true
+      description: Snapshot index.
+      schema:
+        type: integer
+        minimum: 0
+
+  headers:
+    CacheForever:
+      description: '`public, max-age=31536000`; the response also carries `Expires: Mon, 31 Dec 2035 12:00:00 gmt`.'
+      schema:
+        type: string
+    CorsAllowOrigin:
+      description: Echo of the request `Origin` when it is allowed; the header is absent otherwise.
+      schema:
+        type: string
+
+  responses:
+    BooleanResult:
+      description: >-
+        `true` on success, `false` when the operation was refused or failed. The HTTP status is `200` either way.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/BooleanResult'
+    PresetSaveResult:
+      description: Result of saving a preset.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [ok]
+            properties:
+              ok: { type: boolean }
+              bundle: { type: string, description: "Preset bundle directory (only when `ok`)." }
+              uri: { type: string, description: "New preset URI (only when `ok`)." }
+    ImageJobResult:
+      description: Outcome of a thumbnail job.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [ok, ctime]
+            properties:
+              ok: { type: boolean }
+              ctime:
+                type: string
+                description: Creation time of the thumbnail with one decimal, `"0.0"` on failure.
+    VersionRedirect:
+      description: Redirect to the same page with the right `v` query parameter (or to `/?v=...`).
+      headers:
+        Location:
+          schema: { type: string }
+    BadRequest:
+      description: A required argument is missing or cannot be parsed (`400 Missing argument <name>`, or `500` for unparsable numbers).
+      content:
+        text/html:
+          schema: { type: string }
+    NotFound:
+      description: Unknown plugin/file/resource.
+      content:
+        text/html:
+          schema: { type: string }
+    ServerError:
+      description: Unhandled exception.
+      content:
+        text/html:
+          schema: { type: string }
+
+  schemas:
+    BooleanResult:
+      type: boolean
+      description: Bare JSON `true` / `false`.
+
+    IntBoolean:
+      type: integer
+      enum: [0, 1]
+      description: Boolean flag encoded as `0` / `1` in form data.
+
+    OkErrorResult:
+      type: object
+      required: [ok]
+      properties:
+        ok: { type: boolean }
+        error: { type: string }
+
+    UploadResultTrue:
+      type: object
+      required: [ok, result]
+      properties:
+        ok: { type: boolean, const: true }
+        result: { type: boolean, const: true }
+
+    SystemInfo:
+      type: object
+      properties:
+        release: { type: string, description: "Image version." }
+        controller: { type: string, description: "Controller (HMI) firmware revision." }
+        uptime:
+          type: [integer, "null"]
+          description: Seconds since boot.
+        hwname: { type: string }
+        architecture: { type: string }
+        cpu: { type: string }
+        platform: { type: string }
+        bin_compat: { type: string, description: "Binary compatibility id used to select plugin builds." }
+        model: { type: string }
+        sysdate: { type: string, description: "Date the system image was generated." }
+        python:
+          type: object
+          properties:
+            version: { type: string }
+        uname:
+          type: object
+          properties:
+            machine: { type: string }
+            release: { type: string }
+            sysname: { type: string }
+            version: { type: string }
+
+    SystemPreferences:
+      type: object
+      properties:
+        bluetooth_name: { type: string, description: "From `/data/bluetooth/name`." }
+        jack_buffer_size: { type: integer, default: 128, description: "From `/data/jack-buffer-size`." }
+        jack_mono_copy: { type: boolean }
+        jack_sync_mode: { type: boolean }
+        separate_spdif_outs: { type: boolean }
+        service_mod_peakmeter: { type: boolean, description: "`true` unless `/data/disable-mod-peakmeter` exists." }
+        service_mod_sdk: { type: boolean }
+        service_netmanager: { type: boolean }
+        autorestart_hmi: { type: boolean }
+
+    SystemExechangeRequest:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [command, filecreate, filewrite, service]
+        cmd:
+          type: string
+          description: '`type=command`: `reboot`, `restore`, `backup-export <d>,<p>` or `backup-import <d>,<p>` (`d`/`p` are `0`/`1`: include data / pedalboards).'
+          examples: ["backup-export 1,1"]
+        path:
+          type: string
+          description: '`type=filecreate` / `filewrite`: whitelisted file name below `/data`.'
+        create:
+          allOf:
+            - $ref: '#/components/schemas/IntBoolean'
+          description: '`type=filecreate`'
+        content:
+          type: string
+          description: '`type=filewrite`'
+        name:
+          type: string
+          description: '`type=service`'
+          enum: [hmi-update, mod-peakmeter, mod-sdk, netmanager]
+        enable:
+          allOf:
+            - $ref: '#/components/schemas/IntBoolean'
+          description: '`type=service`'
+        inverted:
+          allOf:
+            - $ref: '#/components/schemas/IntBoolean'
+          description: '`type=service`: the marker file is `disable-<name>` instead of `enable-<name>`.'
+        persistent:
+          allOf:
+            - $ref: '#/components/schemas/IntBoolean'
+          description: '`type=service`: also create/remove the marker file.'
+
+    PackageInstallResult:
+      type: object
+      required: [ok, removed, installed]
+      properties:
+        ok: { type: boolean }
+        error: { type: string, description: "Present when `ok` is false." }
+        removed:
+          type: array
+          items: { type: string }
+          description: URIs of plugins that were replaced or removed.
+        installed:
+          type: array
+          items: { type: string }
+          description: URIs of plugins now available.
+
+    PackageUninstallResult:
+      type: object
+      required: [ok, removed]
+      properties:
+        ok: { type: boolean }
+        error: { type: string }
+        removed:
+          type: array
+          items: { type: string }
+
+    # ----------------------------------------------------------------- plugins
+    PluginSummary:
+      type: object
+      description: Entry of `/effect/list`.
+      properties:
+        uri: { type: string }
+        name: { type: string }
+        brand: { type: string }
+        label: { type: string }
+        comment: { type: string }
+        buildEnvironment: { type: string, description: "Build environment tag (empty for non-store builds)." }
+        category:
+          type: array
+          items: { type: string }
+        microVersion: { type: integer }
+        minorVersion: { type: integer }
+        release: { type: integer }
+        builder: { type: integer }
+        licensed: { $ref: '#/components/schemas/PluginLicense' }
+        iotype: { $ref: '#/components/schemas/PluginIoType' }
+        gui:
+          type: object
+          properties:
+            resourcesDirectory: { type: string }
+            screenshot: { type: string }
+            thumbnail: { type: string }
+
+    PluginLicense:
+      type: integer
+      enum: [-1, 0, 1]
+      description: "`-1` trial, `0` non-commercial / free, `1` paid (licensed)."
+
+    PluginIoType:
+      type: integer
+      enum: [0, 1, 2, 3, 4]
+      description: "`0` none, `1` mono audio, `2` stereo audio, `3` instrument, `4` MIDI."
+
+    PluginInfo:
+      type: object
+      description: >-
+        Full plugin description. Every nested list element also carries an internal `valid: true` flag.
+        Strings are empty when the plugin does not define them.
+      properties:
+        valid: { type: boolean }
+        uri: { type: string }
+        name: { type: string }
+        binary: { type: string }
+        brand: { type: string }
+        label: { type: string }
+        license: { type: string }
+        comment: { type: string }
+        buildEnvironment: { type: string }
+        category:
+          type: array
+          items: { type: string }
+        microVersion: { type: integer }
+        minorVersion: { type: integer }
+        release: { type: integer }
+        builder: { type: integer }
+        licensed: { $ref: '#/components/schemas/PluginLicense' }
+        iotype: { $ref: '#/components/schemas/PluginIoType' }
+        hasExternalUI: { type: boolean }
+        version: { type: string, description: "Textual version." }
+        stability: { type: string }
+        author:
+          type: object
+          properties:
+            name: { type: string }
+            homepage: { type: string }
+            email: { type: string }
+        bundles:
+          type: array
+          items: { type: string }
+        gui: { $ref: '#/components/schemas/PluginGui' }
+        ports:
+          type: object
+          properties:
+            audio: { $ref: '#/components/schemas/PluginPortsByDirection' }
+            control: { $ref: '#/components/schemas/PluginPortsByDirection' }
+            cv: { $ref: '#/components/schemas/PluginPortsByDirection' }
+            midi: { $ref: '#/components/schemas/PluginPortsByDirection' }
+        portGroups:
+          type: array
+          items:
+            type: object
+            properties:
+              valid: { type: boolean }
+              uri: { type: string }
+              symbol: { type: string }
+              name: { type: string }
+              index: { type: integer }
+        parameters:
+          type: array
+          items: { $ref: '#/components/schemas/PluginParameter' }
+        presets:
+          type: array
+          items: { $ref: '#/components/schemas/PluginPreset' }
+
+    NonCachedPluginInfo:
+      type: object
+      properties:
+        licensed: { $ref: '#/components/schemas/PluginLicense' }
+        presets:
+          type: array
+          items: { $ref: '#/components/schemas/PluginPreset' }
+
+    PluginPreset:
+      type: object
+      properties:
+        valid: { type: boolean }
+        uri: { type: string }
+        label: { type: string }
+        path: { type: string, description: "File path of the preset (empty for factory presets inside the bundle)." }
+
+    PluginGui:
+      type: object
+      description: modgui description. Empty strings when the plugin has no modgui.
+      properties:
+        resourcesDirectory: { type: string }
+        iconTemplate: { type: string }
+        settingsTemplate: { type: string }
+        javascript: { type: string }
+        stylesheet: { type: string }
+        screenshot: { type: string }
+        thumbnail: { type: string }
+        discussionURL: { type: string }
+        documentation: { type: string }
+        brand: { type: string }
+        label: { type: string }
+        model: { type: string }
+        panel: { type: string }
+        color: { type: string }
+        knob: { type: string }
+        ports:
+          type: array
+          items:
+            type: object
+            properties:
+              valid: { type: boolean }
+              index: { type: integer }
+              name: { type: string }
+              symbol: { type: string }
+        monitoredOutputs:
+          type: array
+          items: { type: string }
+          description: Output port symbols that the GUI wants to receive as `output_set`.
+
+    PluginPortsByDirection:
+      type: object
+      properties:
+        input:
+          type: array
+          items: { $ref: '#/components/schemas/PluginPort' }
+        output:
+          type: array
+          items: { $ref: '#/components/schemas/PluginPort' }
+
+    PluginPort:
+      type: object
+      properties:
+        valid: { type: boolean }
+        index: { type: integer }
+        name: { type: string }
+        symbol: { type: string }
+        ranges:
+          type: object
+          properties:
+            minimum: { type: number }
+            maximum: { type: number }
+            default: { type: number }
+        units:
+          $ref: '#/components/schemas/PluginUnits'
+        comment: { type: string }
+        designation: { type: string, description: "LV2 designation URI (e.g. transport `bpm`)." }
+        group: { type: string, description: "Port group URI." }
+        properties:
+          type: array
+          items: { type: string }
+          description: LV2 port property short names (`toggled`, `integer`, `enumeration`, `logarithmic`, `trigger`, ...).
+        rangeSteps: { type: integer }
+        scalePoints:
+          type: array
+          items:
+            type: object
+            properties:
+              valid: { type: boolean }
+              value: { type: number }
+              label: { type: string }
+        shortName: { type: string }
+
+    PluginUnits:
+      type: object
+      properties:
+        label: { type: string }
+        render: { type: string }
+        symbol: { type: string }
+        _custom: { type: boolean, description: "Internal; do not use." }
+
+    PluginParameter:
+      type: object
+      description: LV2 patch parameter (accessed through WebSocket `patch_get` / `patch_set`).
+      properties:
+        valid: { type: boolean }
+        readable: { type: boolean }
+        writable: { type: boolean }
+        uri: { type: string }
+        label: { type: string }
+        type:
+          type: string
+          description: Atom type URI, e.g. `http://lv2plug.in/ns/ext/atom#Path`, `#Float`, `#Bool`, `#String`.
+        ranges:
+          type: object
+          description: Floats/ints for numeric types, empty minimum/maximum and a string default for `#String`.
+          properties:
+            minimum: { type: [number, string] }
+            maximum: { type: [number, string] }
+            default: { type: [number, string] }
+        units:
+          $ref: '#/components/schemas/PluginUnits'
+        comment: { type: string }
+        shortName: { type: string }
+        fileTypes:
+          type: array
+          items: { type: string }
+          description: Kinds of user files accepted (see `/files/list` types).
+        supportedExtensions:
+          type: array
+          items: { type: string }
+
+    # -------------------------------------------------------------- addressing
+    AddressingRequest:
+      type: object
+      required: [uri, minimum, maximum, value]
+      properties:
+        uri:
+          type: string
+          description: >-
+            Actuator URI, e.g. `/hmi/knob1`, a Control Chain actuator, a MIDI pseudo URI (`/midi-custom_Ch.1_CC#7`),
+            `/bpm`, a CV port URI, or `null` to remove the addressing.
+        label:
+          type: string
+          description: Display name on the hardware (defaults to `---`).
+        minimum: { type: number }
+        maximum: { type: number }
+        value: { type: number, description: "Current value of the port." }
+        steps: { type: integer, default: 33 }
+        tempo: { type: boolean, default: false, description: "Control follows the tempo; `dividers` then applies." }
+        dividers:
+          type: [array, number, "null"]
+          description: Tempo divider options (value or list).
+        page: { type: [integer, "null"], description: "HMI page." }
+        subpage: { type: [integer, "null"], description: "HMI sub-page." }
+        coloured: { type: [integer, boolean, "null"], description: "Use the colour LED feedback." }
+        momentary: { type: [integer, boolean, "null"], description: "Momentary (instead of latching) behaviour." }
+        operationalMode: { type: [string, "null"], description: "CV operational mode (`+`, `-`, `b`...)." }
+
+    Actuator:
+      type: object
+      description: >-
+        Hardware actuator metadata, sent as base64 JSON by `act_add`, and injected as `hardware_profile` into the index page
+        (the latter is a list of actuators).
+      properties:
+        uri: { type: string }
+        name: { type: string }
+        modes: { type: string, description: "Addressing modes accepted, as a comma separated string." }
+        steps:
+          type: array
+          items: { type: integer }
+        max_assigns: { type: integer }
+        feedback: { type: boolean }
+        widgets:
+          type: array
+          items: { type: object, additionalProperties: true }
+        actuator_group:
+          type: array
+          items: { type: string }
+      additionalProperties: true
+
+    # ---------------------------------------------------------------- pedalboards
+    PedalboardSummary:
+      type: object
+      properties:
+        broken: { type: boolean, description: "Needs plugins that are not installed." }
+        factory: { type: boolean }
+        hasTrialPlugins: { type: boolean }
+        uri: { type: string }
+        bundle: { type: string, description: "Absolute bundle path." }
+        title: { type: string }
+        version: { type: integer, description: "Incremented every save; usable as a cache buster." }
+
+    MidiControl:
+      type: object
+      properties:
+        channel: { type: integer, description: "`-1` when not mapped." }
+        control: { type: integer }
+        hasRanges: { type: boolean }
+        minimum: { type: number }
+        maximum: { type: number }
+
+    PedalboardInfo:
+      type: object
+      properties:
+        title: { type: string }
+        width: { type: integer }
+        height: { type: integer }
+        factory: { type: boolean }
+        midi_separated_mode: { type: boolean }
+        midi_loopback: { type: boolean }
+        plugins:
+          type: array
+          items:
+            type: object
+            properties:
+              valid: { type: boolean }
+              bypassed: { type: boolean }
+              instanceNumber: { type: integer }
+              instance: { type: string }
+              uri: { type: string }
+              bypassCC: { $ref: '#/components/schemas/MidiControl' }
+              x: { type: number }
+              y: { type: number }
+              preset: { type: string }
+              ports:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    valid: { type: boolean }
+                    symbol: { type: string }
+                    value: { type: number }
+                    midiCC: { $ref: '#/components/schemas/MidiControl' }
+        connections:
+          type: array
+          items:
+            type: object
+            properties:
+              valid: { type: boolean }
+              source: { type: string }
+              target: { type: string }
+        hardware:
+          type: object
+          properties:
+            audio_ins: { type: integer }
+            audio_outs: { type: integer }
+            cv_ins: { type: integer }
+            cv_outs: { type: integer }
+            midi_ins:
+              type: array
+              items: { $ref: '#/components/schemas/HardwareMidiPort' }
+            midi_outs:
+              type: array
+              items: { $ref: '#/components/schemas/HardwareMidiPort' }
+            serial_midi_in: { type: boolean }
+            serial_midi_out: { type: boolean }
+            midi_merger_out: { type: boolean }
+            midi_broadcaster_in: { type: boolean }
+        timeInfo:
+          type: object
+          properties:
+            available:
+              type: integer
+              description: Bit mask. `1` BPB, `2` BPM, `4` rolling are stored.
+            bpb: { type: number }
+            bpbCC: { $ref: '#/components/schemas/MidiControl' }
+            bpm: { type: number }
+            bpmCC: { $ref: '#/components/schemas/MidiControl' }
+            rolling: { type: boolean }
+            rollingCC: { $ref: '#/components/schemas/MidiControl' }
+        version: { type: integer }
+
+    HardwareMidiPort:
+      type: object
+      properties:
+        valid: { type: boolean }
+        symbol: { type: string }
+        name: { type: string }
+
+    Bank:
+      type: object
+      required: [title, pedalboards]
+      properties:
+        title: { type: string }
+        pedalboards:
+          type: array
+          items: { $ref: '#/components/schemas/PedalboardSummary' }
+      additionalProperties: true
+
+    BankInput:
+      type: object
+      required: [title, pedalboards]
+      properties:
+        title: { type: string }
+        pedalboards:
+          type: array
+          items:
+            type: object
+            required: [bundle, title]
+            properties:
+              bundle: { type: string }
+              title: { type: string }
+            additionalProperties: true
+      additionalProperties: true
+
+    # ---------------------------------------------------------------------- MIDI
+    MidiDevices:
+      type: object
+      required: [devsInUse, devList, names, midiAggregatedMode]
+      properties:
+        devsInUse:
+          type: array
+          items: { type: string }
+          description: Ids of the devices currently enabled.
+        devList:
+          type: array
+          items: { type: string }
+          description: Ids of all known devices (sorted). A `a;b` id means separate in/out ports of one device.
+        names:
+          type: object
+          additionalProperties: { type: string }
+          description: Id → display name, suffixed with `(in)` or `(in+out)`.
+        midiAggregatedMode:
+          type: boolean
+
+    # --------------------------------------------------------------------- files
+    UserFile:
+      type: object
+      properties:
+        fullname: { type: string, description: "Absolute path on the device." }
+        dirname: { type: string, description: "Sub-directory below the type folder (may be empty)." }
+        basename: { type: string }
+        basepath: { type: string, description: "Type folder, e.g. `/data/user-files/NAM Models`." }
+        filetype: { type: string }
+
+    UploadConfig:
+      type: object
+      description: JSON placed (URL-encoded) in the `X-Upload-Config` header.
+      properties:
+        filename: { type: string, description: "Destination file name (default is a random id)." }
+        filetype:
+          type: string
+          description: One of the `types` accepted by `/files/list`; inferred from the extension if omitted.
+        directory: { type: string, description: "Sub-folder to put the file in." }
+        onDirectoryConflict:
+          type: string
+          enum: [merge, rename]
+          default: merge
+          description: "`rename` appends ` 01`, ` 02`, ... to a folder name that already exists."
+        metadata:
+          type: object
+          description: Informational (the frontend sends `{source:'T3K',data:{toneId,modelId}}`); the current server code does not persist it.
+          additionalProperties: true
+
+    # ------------------------------------------------------------ WebSocket data
+    IndexTemplateContext:
+      type: object
+      description: >-
+        Variables injected into `index.html` by `TemplateHandler.index()`. This is **not** a JSON response; the values end up
+        as JavaScript/HTML literals inside the rendered page, which the frontend reads at start-up. Strings marked *escaped*
+        have `\` and `'` escaped and whitespace squeezed so that they can be embedded in single-quoted JavaScript strings.
+      properties:
+        default_icon_template: { type: string, description: "Escaped HTML template used for plugins without modgui." }
+        default_settings_template: { type: string, description: "Escaped HTML template of the default plugin settings." }
+        default_pedalboard: { type: string, description: "Escaped path of the default pedalboard." }
+        cloud_url: { type: string, description: "Cloud API base URL." }
+        cloud_labs_url: { type: string }
+        plugins_url: { type: string }
+        pedalboards_url: { type: string }
+        pedalboards_labs_url: { type: string }
+        controlchain_url: { type: string, description: "Where Control Chain firmware is published." }
+        hardware_profile: { type: string, contentEncoding: base64, description: "Base64 of the JSON list of `Actuator`." }
+        version: { type: string, description: "Value of the `v` query argument." }
+        bin_compat: { type: string }
+        codec_truebypass: { type: string, enum: ["true", "false"] }
+        factory_pedalboards: { type: boolean }
+        platform: { type: string }
+        addressing_pages: { type: integer }
+        lv2_plugin_dir: { type: string }
+        bundlepath: { type: string, description: "Escaped path of the loaded pedalboard." }
+        title: { type: string, description: "Escaped title of the loaded pedalboard." }
+        size: { type: string, description: "JSON `[width, height]`." }
+        fulltitle: { type: string, description: "HTML-escaped \"title - snapshot\"." }
+        titleblend: { type: string, enum: ["", blend] }
+        dev_api_class: { type: string, enum: ["", dev_api] }
+        using_desktop: { type: string, enum: ["true", "false"] }
+        using_mod: { type: string, enum: ["true", "false"] }
+        user_name: { type: string }
+        user_email: { type: string }
+        favorites: { type: string, description: "JSON list of favourite plugin URIs." }
+        preferences: { type: string, description: "JSON object of the user preferences." }
+        feedback_url: { type: string }
+        bufferSize: { type: integer }
+        sampleRate: { type: integer }
+        t3k_api_key: { type: string, description: "Resolved from user preferences, then the system key file, then the build-time client id." }

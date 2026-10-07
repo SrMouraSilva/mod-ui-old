@@ -58,3 +58,53 @@ And now you are ready to start the webserver::
 
 Setting the environment variables is needed when developing on a PC.
 Open your browser and point to http://localhost:8888/.
+
+API documentation
+-----------------
+
+``docs/openapi.yml`` describes everything the backend exposes to the browser: the HTTP endpoints, the WebSocket
+messages (``/websocket``, ``/rpbsocket``, ``/rplsocket``), the server-rendered pages and the other channels.
+Open it with any OpenAPI viewer (Swagger UI, Redoc, the VS Code OpenAPI extension) or lint it with::
+
+    $ npx @redocly/cli lint docs/openapi.yml
+
+TypeScript client (modui-client)
+--------------------------------
+
+``html/js/lib/modui-client/`` contains a small, typed client for the backend (``fetch`` + WebSocket).
+It is optional: the existing UI does not depend on it and Python-only work needs none of this.
+
+The source is a single TypeScript file, ``modui-client.ts``. The build bundles it into one plain JavaScript file,
+``html/js/lib/modui-client.js``. That file is **generated and not versioned** (see ``.gitignore``);
+``index.html`` loads it, ``setup.py`` and ``mod-deploy.sh`` pick it up with the other ``html/js/lib/*.js`` files.
+If you do not build it, the page still works, the browser just reports a 404 for that script.
+
+Requirements: Node.js 22.12 or newer.
+
+Build, watch and test::
+
+    $ cd html/js/lib/modui-client
+    $ npm install
+    $ npm run build      # writes html/js/lib/modui-client.js
+    $ npm run watch      # rebuilds on change, with an inline source map
+    $ npm test           # type check + unit tests (vitest)
+
+npm 11 may warn that esbuild's install script was not approved; the build works without it.
+
+Release builds must run ``npm install && npm run build`` in that folder before installing ``html/``,
+otherwise ``modui-client.js`` is missing from the package.
+
+Usage in the page (or in the browser console), where it is available as ``window.ModUiClient``::
+
+    const client = new ModUiClient();
+    const pedalboards = await client.pedalboards.list();
+    const info = await pedalboards[0].info();
+    await client.device.load(info);      // resolves after the WebSocket "loading_end"
+    await client.device.loadDefault();   // empty "Untitled" pedalboard
+
+From another origin or from Node, pass ``new ModUiClient({ baseUrl: 'http://modduo.local' })``.
+Every public symbol is documented in ``modui-client.ts``; the current scope (pedalboards) and the planned API
+are in ``docs/plans/2026-10-modui-client.md``.
+
+Known limitation: when the client loads a pedalboard while the classic UI is open, the canvas reloads through the
+WebSocket, but the title shown by the classic UI is not updated.
