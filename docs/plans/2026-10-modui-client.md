@@ -123,3 +123,10 @@ with a backend broadcast (suggestion below).
 4. Manual (if a device/dev server is available): open the UI, in DevTools run
    `const c = new ModUiClient(); const l = await c.pedalboards.list(); await c.device.load(await l[0].info()); await c.device.loadDefault()`
    and watch the canvas reload; if no device is reachable, report that this step was not run.
+
+## Revisions
+
+- **2026-10-07** — Sources split into modules under `html/js/lib/modui-client/src/` (`index.ts` build entry,
+  `client.ts`, `pedalboards.ts`, `device.ts`, `events.ts`, `http.ts`, `errors.ts`, `types.ts`, `runtime.ts`);
+  tests split per area under `test/` with shared fakes in `test/helpers.ts`; `noUnusedLocals` enabled.
+  Developer guide with Mermaid diagrams added at `docs/modui-client.md`. Node.js >= 22.12 (vitest 5).

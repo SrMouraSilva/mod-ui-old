@@ -74,8 +74,8 @@ TypeScript client (modui-client)
 ``html/js/lib/modui-client/`` contains a small, typed client for the backend (``fetch`` + WebSocket).
 It is optional: the existing UI does not depend on it and Python-only work needs none of this.
 
-The source is a single TypeScript file, ``modui-client.ts``. The build bundles it into one plain JavaScript file,
-``html/js/lib/modui-client.js``. That file is **generated and not versioned** (see ``.gitignore``);
+The sources live in ``html/js/lib/modui-client/src/`` (one module per area) and the tests in ``test/``.
+The build bundles them into one plain JavaScript file, ``html/js/lib/modui-client.js``. That file is **generated and not versioned** (see ``.gitignore``);
 ``index.html`` loads it, ``setup.py`` and ``mod-deploy.sh`` pick it up with the other ``html/js/lib/*.js`` files.
 If you do not build it, the page still works, the browser just reports a 404 for that script.
 
@@ -103,7 +103,8 @@ Usage in the page (or in the browser console), where it is available as ``window
     await client.device.loadDefault();   // empty "Untitled" pedalboard
 
 From another origin or from Node, pass ``new ModUiClient({ baseUrl: 'http://modduo.local' })``.
-Every public symbol is documented in ``modui-client.ts``; the current scope (pedalboards) and the planned API
+The developer guide, with architecture, class and sequence diagrams, is ``docs/modui-client.md``.
+Every public symbol is documented in the sources (TSDoc); the current scope (pedalboards) and the planned API
 are in ``docs/plans/2026-10-modui-client.md``.
 
 Known limitation: when the client loads a pedalboard while the classic UI is open, the canvas reloads through the

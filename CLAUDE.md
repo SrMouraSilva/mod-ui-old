@@ -12,8 +12,9 @@ mod-ui is the web interface of MOD audio devices.
 - **Frontend**: classic jQuery code in `html/` (`html/js/*.js`, templates in `html/*.html` and `html/include/`).
 - **API contract**: `docs/openapi.yml` documents every HTTP endpoint, every WebSocket message
   (`/websocket`, `/rpbsocket`, `/rplsocket`), the server-rendered pages and the other channels.
-- **Typed client**: `html/js/lib/modui-client/modui-client.ts`, a class-based TypeScript client built on `fetch` and
-  the main WebSocket. Current scope: pedalboards (list, info, load, loadDefault, reset).
+- **Typed client**: `html/js/lib/modui-client/` (sources in `src/`, tests in `test/`), a class-based TypeScript
+  client built on `fetch` and the main WebSocket. Current scope: pedalboards (list, info, load, loadDefault, reset).
+  Developer guide with diagrams: `docs/modui-client.md`.
 - **Plans**: `docs/plans/` (see "Plans" below).
 
 ## Commands
@@ -45,15 +46,21 @@ or a WebSocket message (`msg_callback`/`write_message` in `mod/host.py`, `mod/se
    It must stay valid: `npx @redocly/cli lint docs/openapi.yml`. The trailing-slash, 2XX and 4XX rules flag
    real routes, so they can be skipped
    (`--skip-rule=no-path-trailing-slash --skip-rule=operation-2xx-response --skip-rule=operation-4xx-response --skip-rule=no-unused-components`).
-2. Update `html/js/lib/modui-client/modui-client.ts` when the change affects an area the client covers
-   (today: pedalboards). New areas are added on request and planned first (see "Plans").
-3. Add or adjust tests in `modui-client.test.ts` and run `npm test`.
-4. Update the README section "TypeScript client (modui-client)" when usage changes.
+2. Update the client in `html/js/lib/modui-client/src/` (wire types in `types.ts`, behaviour in the area module)
+   when the change affects an area the client covers (today: pedalboards). New areas are added on request and
+   planned first (see "Plans").
+3. Add or adjust tests in `html/js/lib/modui-client/test/` and run `npm test`.
+4. Update `docs/modui-client.md` (including its Mermaid diagrams) and the README section
+   "TypeScript client (modui-client)" when the API or its usage changes.
 
 ### TypeScript client conventions
-- One source file (`modui-client.ts`) and one test file. The build (esbuild, IIFE, ES2018) produces a single
-  `html/js/lib/modui-client.js` that is **never committed**. `index.html` loads it; it exposes
-  `window.ModUiClient` and `window.ModUi`.
+- One module per concern in `src/` (`client.ts`, `pedalboards.ts`, `device.ts`, `events.ts`, `http.ts`,
+  `errors.ts`, `types.ts`, `runtime.ts`); `src/index.ts` is the build entry, re-exports the public API and sets
+  `window.ModUiClient` / `window.ModUi`. New areas get their own module and test file.
+- Tests: one file per area in `test/`, sharing fakes from `test/helpers.ts` (`makeClient`, `connected`,
+  `FakeWebSocket`, `flush`).
+- The build (esbuild, IIFE, ES2018) produces a single `html/js/lib/modui-client.js` that is **never committed**.
+  `index.html` loads it.
 - No runtime dependencies. Dev dependencies only: `typescript`, `esbuild`, `vitest`, pinned to exact versions.
   (The repository ignores `package-lock.json`.)
 - Classes per feature area, reachable from `ModUiClient`: `client.pedalboards` (library), `client.device`
