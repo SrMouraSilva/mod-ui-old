@@ -58,8 +58,8 @@ export interface PedalboardPlugin {
   preset: string;
 }
 
-/** A connection stored in a pedalboard (ports like `/graph/capture_1` or `/graph/Gain/in`). */
-export interface PedalboardConnection {
+/** A connection stored in a pedalboard bundle (ports like `/graph/capture_1` or `/graph/Gain/in`). */
+export interface PedalboardInfoConnection {
   valid: boolean;
   source: string;
   target: string;
@@ -113,7 +113,7 @@ export interface PedalboardInfo {
   midi_separated_mode: boolean;
   midi_loopback: boolean;
   plugins: PedalboardPlugin[];
-  connections: PedalboardConnection[];
+  connections: PedalboardInfoConnection[];
   hardware: PedalboardHardware;
   timeInfo: PedalboardTimeInfo;
   version: number;
@@ -171,3 +171,79 @@ export interface LoadOptions {
   /** Maximum time to wait for the WebSocket `loading_end`, in ms. Defaults to {@link ModUiClientOptions.loadTimeoutMs}. */
   timeoutMs?: number;
 }
+
+/** Entry returned by `GET /effect/list` (schema `PluginSummary`). */
+export interface PluginSummary {
+  uri: string;
+  name: string;
+  brand: string;
+  label: string;
+  comment: string;
+  /** Build environment tag (empty for non-store builds). */
+  buildEnvironment: string;
+  category: string[];
+  microVersion: number;
+  minorVersion: number;
+  release: number;
+  builder: number;
+  /** `-1` trial, `0` non-commercial / free, `1` paid (licensed). */
+  licensed: number;
+  /** `0` none, `1` mono audio, `2` stereo audio, `3` instrument, `4` MIDI. */
+  iotype: number;
+  gui?: { resourcesDirectory?: string; screenshot?: string; thumbnail?: string };
+}
+
+/** A port of a plugin (schema `PluginPort`). */
+export interface PluginPortInfo {
+  valid: boolean;
+  index: number;
+  name: string;
+  symbol: string;
+  shortName?: string;
+  comment?: string;
+  designation?: string;
+  group?: string;
+  properties?: string[];
+  ranges?: { minimum: number; maximum: number; default: number };
+}
+
+/** Input and output ports of one type (schema `PluginPortsByDirection`). */
+export interface PluginPortsByDirection {
+  input?: PluginPortInfo[];
+  output?: PluginPortInfo[];
+}
+
+/**
+ * Full description of a plugin: `GET /effect/get` and `POST /effect/bulk/`, and the answer of `GET /effect/add/…`
+ * (schema `PluginInfo`). Only the fields this client uses are typed; the server sends more.
+ */
+export interface PluginInfo extends PluginSummary {
+  valid: boolean;
+  binary: string;
+  hasExternalUI: boolean;
+  /** Textual version. */
+  version: string;
+  stability: string;
+  ports: {
+    audio?: PluginPortsByDirection;
+    control?: PluginPortsByDirection;
+    cv?: PluginPortsByDirection;
+    midi?: PluginPortsByDirection;
+  };
+  [other: string]: unknown;
+}
+
+/** Position of a plugin block in the pedalboard canvas. */
+export interface Position {
+  x: number;
+  y: number;
+}
+
+/** Anything {@link PedalboardPlugins.add} accepts: a plugin URI, a {@link Plugin} or a {@link PluginInfo}. */
+export type PluginTarget = string | { readonly uri: string };
+
+/** Signal type of a connectable port. Control ports are not connectable. */
+export type PortType = 'audio' | 'midi' | 'cv';
+
+/** Direction of a port, seen from the graph: an `output` is a signal source, an `input` a sink. */
+export type PortDirection = 'input' | 'output';

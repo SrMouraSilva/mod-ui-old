@@ -13,7 +13,9 @@ mod-ui is the web interface of MOD audio devices.
 - **API contract**: `docs/openapi.yml` documents every HTTP endpoint, every WebSocket message
   (`/websocket`, `/rpbsocket`, `/rplsocket`), the server-rendered pages and the other channels.
 - **Typed client**: `html/js/lib/modui-client/` (sources in `src/`, tests in `test/`), a class-based TypeScript
-  client built on `fetch` and the main WebSocket. Current scope: pedalboards (list, info, remove, load, loadDefault, reset, currentPedalboard get/save/saveAs).
+  client built on `fetch` and the main WebSocket. Current scope: pedalboards (list, info, remove, load, loadDefault, reset, currentPedalboard get/save/saveAs)
+  and live editing of the running pedalboard (`device.plugins.list`, `currentPedalboard.plugins` list/add/remove,
+  `.connections` list/connect/disconnect, `.ports.list()` and `.ports.<audio|midi|cv>.<input()|output()>`).
   Cloud-related endpoints are planned under `client.cloud`.
   Developer guide with diagrams: `docs/modui-client.md`.
 - **Plans**: `docs/plans/` (see "Plans" below).
@@ -58,15 +60,16 @@ or a WebSocket message (`msg_callback`/`write_message` in `mod/host.py`, `mod/se
 The goal is to leave the Python backend as it is. When building `modui-client`, work around backend limits in the client
 and document them in `docs/openapi.yml` and in the plan. **If a feature seems to need a backend change (a new endpoint, a
 new argument, a changed behaviour, a fix), stop and ask the user for confirmation first, explaining why**, and record the
-decision (confirmed or refused) in `docs/plans/2026-10-modui-client.md`. Never edit `mod/`, `modtools/` or `utils/` on your
+decision (confirmed or refused) in the plan of the area concerned (`docs/plans/2026-10-modui-client-pedalboard.md`,
+`docs/plans/2026-10-modui-client-pedalboard-graph.md`, ...). Never edit `mod/`, `modtools/` or `utils/` on your
 own for the client's sake.
 
 ### TypeScript client conventions
 - One module per concern in `src/` (`client.ts`, `pedalboards.ts`, `device.ts`, `events.ts`, `http.ts`,
-  `errors.ts`, `types.ts`, `runtime.ts`); `src/index.ts` is the build entry, re-exports the public API and sets
+  `errors.ts`, `types.ts`, `runtime.ts`, `plugins.ts`, `pedalboard-*.ts`, `graph-state.ts`); `src/index.ts` is the build entry, re-exports the public API and sets
   `window.ModUiClient` / `window.ModUi`. New areas get their own module and test file.
 - Tests: one file per area in `test/`, sharing fakes from `test/helpers.ts` (`makeClient`, `connected`,
-  `FakeWebSocket`, `flush`).
+  `FakeWebSocket`, `flush`, `connectedWith` for a replay that carries graph frames).
 - The build (esbuild, IIFE, ES2018) produces a single `html/js/lib/modui-client.js` that is **never committed**.
   `index.html` loads it.
 - No runtime dependencies. Dev dependencies only: `typescript`, `esbuild`, `vitest`, pinned to exact versions.
@@ -91,6 +94,9 @@ own for the client's sake.
 - Many state-changing endpoints use `GET` (`/effect/add/...`, `/reset`, `/snapshot/load`, ...).
 - `get_argument` reads both the query string and the form body. Trailing slashes in routes matter
   (`/pedalboard/load_bundle/`, `/pedalboard/info/`).
+- No endpoint lists the plugins or connections of the running pedalboard: the client rebuilds them from the WebSocket
+  (`graph-state.ts`). `GET /effect/connect` of an existing connection answers `true` without a frame, and
+  `GET /effect/disconnect` always answers `true` (and always sends its frame).
 - `POST /pedalboard/load_bundle/` does not clear the current graph; `/reset` does.
 
 ### General
@@ -100,6 +106,6 @@ own for the client's sake.
 ## Plans
 
 Implementation plans are saved in `docs/plans/` as Markdown, named `YYYY-MM-<topic>.md`
-(e.g. `docs/plans/2026-10-modui-client.md`). Write the plan there before implementing a non-trivial change and
+(e.g. `docs/plans/2026-10-modui-client-pedalboard.md`). Write the plan there before implementing a non-trivial change and
 keep it updated with the final decisions. Plans may also list suggested future work that is not implemented yet;
 check the plan before extending an area.

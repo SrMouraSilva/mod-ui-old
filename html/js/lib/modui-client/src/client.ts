@@ -11,6 +11,7 @@ import { ModUiError } from './errors';
 import { EventChannel } from './events';
 import { HttpTransport } from './http';
 import { PedalboardsApi } from './pedalboards';
+import { PluginsApi } from './plugins';
 import type { FetchLike, WebSocketFactory, WebSocketLike } from './runtime';
 
 /** Options of {@link ModUiClient}. All are optional in a mod-ui page. */
@@ -33,6 +34,11 @@ export interface ModUiClientOptions {
   loadTimeoutMs?: number;
   /** Timeout for opening the WebSocket and receiving the initial state replay, in ms. Default: 30000. */
   connectTimeoutMs?: number;
+  /**
+   * Maximum time to wait for the WebSocket frame that confirms a plugin or connection change
+   * (`add`, `remove`, `connect`, `disconnect`), in ms. Default: 10000.
+   */
+  graphTimeoutMs?: number;
 }
 
 /**
@@ -74,9 +80,14 @@ export class ModUiClient {
 
     const http = new HttpTransport(this.baseUrl, fetchImpl);
     const wsUrl = this.baseUrl.replace(/^http/, 'ws') + '/websocket';
-    this.events = new EventChannel(wsUrl, factory, options.webSocket, options.connectTimeoutMs ?? 30000);
+    const connectTimeoutMs = options.connectTimeoutMs ?? 30000;
+    this.events = new EventChannel(wsUrl, factory, options.webSocket, connectTimeoutMs);
     this.pedalboards = new PedalboardsApi(http);
-    this.device = new Device(http, this.events, this.pedalboards, options.loadTimeoutMs ?? 60000);
+    this.device = new Device(http, this.events, this.pedalboards, new PluginsApi(http), options.loadTimeoutMs ?? 60000, {
+      confirmTimeoutMs: options.graphTimeoutMs ?? 10000,
+      // Used when the socket is shared: its state replay has passed, so a short-lived own socket reads a new one.
+      openSnapshotChannel: () => (factory ? new EventChannel(wsUrl, factory, undefined, connectTimeoutMs) : null),
+    });
   }
 
   /** Connects the WebSocket ahead of time (feature methods do it on demand). See {@link EventChannel.connect}. */

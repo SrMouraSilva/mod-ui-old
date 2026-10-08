@@ -2,6 +2,8 @@
 
 Status: approved, 2026-10-07.
 
+Scope: pedalboards. Follow-up: `2026-10-modui-client-pedalboard-graph.md` (plugins and connections of the running pedalboard).
+
 ## Context
 The backend contract is now documented in `openapi.yml`. The next step is a typed, documented,
 class-based browser client that wraps it with `fetch` + the main WebSocket, so new UI code (and AI
@@ -56,7 +58,7 @@ the client and document it in `docs/openapi.yml`. The rule is also in `CLAUDE.md
 | `README.rst` | new section "TypeScript client (modui-client)": install/build/watch/test, output, usage, packaging note |
 | `CLAUDE.md` | new, English (content below) |
 | `openapi.yml` → `docs/openapi.yml` | `git mv`; all references (CLAUDE.md, README, TSDoc) point to `docs/openapi.yml` |
-| `docs/plans/2026-10-modui-client.md` | new – copy of this plan (for the team's review) |
+| `docs/plans/2026-10-modui-client-pedalboard.md` | new – copy of this plan (for the team's review) |
 | `docs/modui-client.md` | new – developer guide with Mermaid diagrams |
 
 First iteration: no backend change (a later one added `GET /pedalboard/current`, see "Revisions" and "Backend change policy"). The files above
@@ -241,3 +243,4 @@ edits never show up and a bundle without images answers `404`. `docs/openapi.yml
     calls `GET /pedalboard/factorycopy/`. `docs/openapi.yml` (`copyFactoryPedalboard`) and `docs/modui-client.md` match.
   - New rule (see "Backend change policy" and `CLAUDE.md`): ask the user before any backend change and record the decision here.
 
+- **2026-10-07 (7)** — Plan renamed from `2026-10-modui-client.md` to `2026-10-modui-client-pedalboard.md`; the graph area has its own plan, `2026-10-modui-client-pedalboard-graph.md`.

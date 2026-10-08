@@ -32,6 +32,11 @@
  * | `pedalboards.ts` | {@link PedalboardsApi} (`client.pedalboards`), {@link PedalboardReference} |
  * | `device.ts` | {@link Device} (`client.device`) — load / reset the running pedalboard |
  * | `current-pedalboard.ts` | {@link CurrentPedalboard} (`client.device.currentPedalboard`) — get / save / saveAs |
+ * | `plugins.ts` | {@link PluginsApi} (`client.device.plugins`), {@link Plugin} — installed plugins |
+ * | `pedalboard-plugins.ts` | {@link PedalboardPlugins} (`currentPedalboard.plugins`) — list / add / remove |
+ * | `pedalboard-connections.ts` | {@link PedalboardConnections} (`currentPedalboard.connections`), {@link PedalboardPorts} (`currentPedalboard.ports.list()`, `.audio.input()` …) |
+ * | `pedalboard-graph.ts` | {@link PluginInstance}, {@link Port}, {@link PedalboardConnection}, and the internal engine |
+ * | `graph-state.ts` | internal WebSocket-fed model of the running graph |
  * | `pedalboard-images.ts` | {@link PedalboardImages} (`reference.images`), {@link ImageStatus} — screenshot and thumbnail |
  * | `events.ts` | {@link EventChannel} (`client.events`) — the main WebSocket |
  * | `http.ts` | `HttpTransport` — internal `fetch` wrapper |
@@ -48,7 +53,11 @@ import { Device } from './device';
 import { ModUiError, ModUiHttpError, ModUiTimeoutError } from './errors';
 import { EventChannel } from './events';
 import { ImageStatus, PedalboardImages } from './pedalboard-images';
+import { PedalboardConnections, PedalboardPortGroup, PedalboardPorts } from './pedalboard-connections';
+import { PedalboardConnection, PluginInstance, Port } from './pedalboard-graph';
+import { PedalboardPlugins } from './pedalboard-plugins';
 import { PedalboardReference, PedalboardsApi } from './pedalboards';
+import { Plugin, PluginsApi } from './plugins';
 
 export { ModUiClient } from './client';
 export type { ModUiClientOptions } from './client';
@@ -58,7 +67,12 @@ export { ModUiError, ModUiHttpError, ModUiTimeoutError } from './errors';
 export { EventChannel } from './events';
 export type { MessageHandler, Waiting } from './events';
 export { ImageStatus, PedalboardImages } from './pedalboard-images';
+export { PedalboardConnections, PedalboardPortGroup, PedalboardPorts } from './pedalboard-connections';
+export { PedalboardConnection, PluginInstance, Port } from './pedalboard-graph';
+export type { PortGroups, PortsByDirection } from './pedalboard-graph';
+export { PedalboardPlugins } from './pedalboard-plugins';
 export { PedalboardReference, PedalboardsApi } from './pedalboards';
+export { Plugin, PluginsApi } from './plugins';
 export type { FetchLike, WebSocketFactory, WebSocketLike } from './runtime';
 export type * from './types';
 
@@ -78,5 +92,14 @@ if (typeof window !== 'undefined') {
     Device,
     CurrentPedalboard,
     EventChannel,
+    Plugin,
+    PluginsApi,
+    PluginInstance,
+    PedalboardPlugins,
+    PedalboardConnection,
+    PedalboardConnections,
+    PedalboardPorts,
+    PedalboardPortGroup,
+    Port,
   };
 }

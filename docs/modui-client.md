@@ -8,9 +8,10 @@ backend has *really* finished them (for example, until a pedalboard is fully loa
 - **Tests**: [`html/js/lib/modui-client/test/`](../html/js/lib/modui-client/test/)
 - **Build output** (generated, not versioned): `html/js/lib/modui-client.js`
 - **Wire contract**: [`docs/openapi.yml`](openapi.yml)
-- **Plan / roadmap**: [`docs/plans/2026-10-modui-client.md`](plans/2026-10-modui-client.md)
+- **Plan / roadmap**: [`docs/plans/2026-10-modui-client-pedalboard.md`](plans/2026-10-modui-client-pedalboard.md);
+  live editing (plugins, connections): [`docs/plans/2026-10-modui-client-pedalboard-graph.md`](plans/2026-10-modui-client-pedalboard-graph.md)
 
-Current scope: **pedalboards** (list, info, copy, remove, images, load, load default, reset, get / save / save-as of the running pedalboard) plus raw WebSocket access.
+Current scope: **pedalboards** (list, info, copy, remove, images, load, load default, reset, get / save / save-as of the running pedalboard), **live editing of the running pedalboard** (installed plugins; list / add / remove its plugins; list / connect / disconnect its connections; its own ports) plus raw WebSocket access.
 
 ---
 
@@ -48,6 +49,71 @@ if ((await images.status()) === ImageStatus.Missing) {  // or Generating / Avail
   img.src = images.getThumbnailUrl();                   // new URL, bypasses the browser cache
 }
 ```
+
+### Plugins, instances and connections
+
+Live editing of the running pedalboard. Everything below goes through `client.device`; calls are queued behind
+`load()`, `reset()` and saves, and each one resolves only after the backend confirmed it on the WebSocket.
+
+```js
+// Installed plugins (the catalogue) — "Plugin"
+const plugins = await client.device.plugins.list();  // Plugin[] (summaries)
+const gain = plugins.find((plugin) => plugin.label === 'Gain');
+console.log(gain.uri, gain.name, gain.brand, gain.category);
+const details = await gain.info();  // PluginInfo: ports, parameters, presets (cached)
+
+const currentPedalboard = client.device.currentPedalboard;
+
+// Plugin instances in the running pedalboard — "PluginInstance"
+const instances = await currentPedalboard.plugins.list();                       // PluginInstance[] (a snapshot)
+const created = await currentPedalboard.plugins.add(gain, { x: 200, y: 100 });  // position is optional (default 0, 0)
+console.log(created.instance);                                                  // "/graph/Gain" ("/graph/Gain_1" if taken)
+console.log(created.x, created.y, created.bypassed, created.uri);
+await currentPedalboard.plugins.add('http://moddevices.com/plugins/mod-devel/Gain');  // a plain URI works too
+
+// Ports of an instance, by type and direction (control ports are not listed)
+created.ports.audio.input;    // Port[]  e.g. "/graph/Gain/in"
+created.ports.audio.output;   // Port[]  e.g. "/graph/Gain/out"
+created.ports.midi.input;     // Port[]
+created.ports.midi.output;    // Port[]
+created.ports.cv.input;       // Port[]
+created.ports.cv.output;      // Port[]
+const gainIn = created.ports.audio.input[0];                   // or by symbol: created.port('in') (Port | undefined)
+
+// Ports of the pedalboard itself: same layout, but they come from the WebSocket, so input() / output() are
+// functions that return a promise (in this client an attribute is never asynchronous), and list() returns them all
+const [capture] = await currentPedalboard.ports.audio.output();  // "/graph/capture_1": a source; owner === null
+const [playback] = await currentPedalboard.ports.audio.input();  // "/graph/playback_1": a sink
+const [midiSink] = await currentPedalboard.ports.midi.input();   // also .midi.output(), .cv.input(), .cv.output()
+const everyPort = await currentPedalboard.ports.list();       // Port[]: audio, midi, cv; sources first
+
+// Connections — "PedalboardConnection": always output -> input, same type
+const all = await currentPedalboard.connections.list();  // PedalboardConnection[]
+all.forEach((c) => console.log(c.from.id, '->', c.to.id));
+const first = await currentPedalboard.connections.connect(capture, gainIn);                          // Port objects...
+const second = await currentPedalboard.connections.connect('/graph/Gain/out', '/graph/playback_1');  // ...or port ids
+await currentPedalboard.connections.connect(capture, playback);                                      // pedalboard port to pedalboard port is fine
+await currentPedalboard.connections.connect(capture, gainIn);                                        // already connected: returns it, no request
+
+// Invalid pairs are rejected before any request (ModUiError)
+await currentPedalboard.connections.connect(gainIn, capture).catch((e) => console.log(e.message));  // input -> output
+await currentPedalboard.connections.connect(capture, midiSink).catch(() => {});         // audio -> midi
+
+await currentPedalboard.connections.disconnect(first);  // throws ModUiError if it is not connected
+
+// Removing
+await created.remove();                                   // same as currentPedalboard.plugins.remove(created)
+await currentPedalboard.plugins.remove('/graph/Gain_1');  // by path; the leading slash is optional
+```
+
+Notes:
+
+- `list()` is asynchronous because no endpoint lists the running plugins or connections: the client builds them
+  from the WebSocket (the state replay plus live frames), so changes made by the classic UI or by other clients show up too.
+- `PluginInstance` objects are snapshots; list again to see a moved or bypassed plugin.
+- The instance name is always generated (like the classic UI does). Removing a plugin also removes its connections.
+- Errors are `ModUiError` (invalid pair, unknown port or plugin, refused by the backend), `ModUiTimeoutError`
+  (the confirming frame never came; `graphTimeoutMs`, default 10 s) and `ModUiHttpError`.
 
 Other setups:
 
@@ -129,6 +195,11 @@ html/js/lib/modui-client/
 │   ├── pedalboard-images.ts   # PedalboardImages (reference.images), ImageStatus
 │   ├── device.ts        # Device
 │   ├── current-pedalboard.ts  # CurrentPedalboard (client.device.currentPedalboard)
+│   ├── plugins.ts       # PluginsApi (client.device.plugins), Plugin
+│   ├── pedalboard-plugins.ts      # PedalboardPlugins (currentPedalboard.plugins)
+│   ├── pedalboard-connections.ts  # PedalboardConnections, PedalboardPorts, PedalboardPortGroup (currentPedalboard.connections / .ports)
+│   ├── pedalboard-graph.ts        # PluginInstance, Port, PedalboardConnection + the internal engine
+│   ├── graph-state.ts   # internal: WebSocket-fed model of the running graph
 │   ├── events.ts        # EventChannel, MessageHandler, Waiting
 │   ├── http.ts          # HttpTransport (internal)
 │   ├── errors.ts        # ModUiError, ModUiHttpError, ModUiTimeoutError
@@ -141,6 +212,8 @@ html/js/lib/modui-client/
     ├── pedalboard-images.test.ts
     ├── device.test.ts
     ├── current-pedalboard.test.ts
+    ├── plugins.test.ts
+    ├── pedalboard-graph.test.ts
     └── events.test.ts
 ```
 
@@ -148,36 +221,45 @@ Module dependencies (arrows point to what a module imports):
 
 ```mermaid
 flowchart TD
-  index[index.ts] --> client[client.ts]
-  index --> device
-  index --> current[current-pedalboard.ts]
-  index --> pedalboards
-  index --> events
-  index --> images[pedalboard-images.ts]
-  index --> errors
-  client --> device[device.ts]
-  client --> pedalboards[pedalboards.ts]
-  client --> events[events.ts]
-  client --> http[http.ts]
-  client --> errors[errors.ts]
-  device --> current
-  current --> http
-  current --> pedalboards
-  current --> errors
-  device --> events
-  device --> http
-  device --> pedalboards
-  device --> errors
-  pedalboards --> http
-  pedalboards --> images
-  images --> http
-  images --> errors
+  index["index.ts"]
+  client["client.ts"]
+  device["device.ts"]
+  current["current-pedalboard.ts"]
+  pedalboards["pedalboards.ts"]
+  images["pedalboard-images.ts"]
+  plugins["plugins.ts"]
+  pplugins["pedalboard-plugins.ts"]
+  pconn["pedalboard-connections.ts"]
+  pgraph["pedalboard-graph.ts"]
+  gstate["graph-state.ts"]
+  events["events.ts"]
+  http["http.ts"]
+  errors["errors.ts"]
+  runtime["runtime.ts"]
+  types["types.ts"]
+
+  index --> client & device & current & pedalboards & images & plugins & pplugins & pconn & pgraph & events & errors
+  client --> device & pedalboards & plugins & events & http & errors
+  device --> current & gstate & pgraph & events & http & pedalboards & errors
+  current --> pplugins & pconn & http & pedalboards & errors
+  pedalboards --> http & images
+  images --> http & errors
+  plugins --> errors
+  pgraph --> errors
+  gstate --> errors
   events --> errors
   http --> errors
-  client -.-> runtime[runtime.ts]
+
+  current -.-> pgraph
+  pplugins -.-> pgraph
+  pconn -.-> pgraph
+  pgraph -.-> http & events & gstate & plugins
+  gstate -.-> events
+  plugins -.-> http
+  client -.-> runtime
   events -.-> runtime
   http -.-> runtime
-  device -.-> types[types.ts]
+  device -.-> types
   pedalboards -.-> types
 ```
 
@@ -249,9 +331,73 @@ classDiagram
 
   class CurrentPedalboard {
     -enqueue: Enqueue
+    +plugins: PedalboardPlugins
+    +connections: PedalboardConnections
+    +ports: PedalboardPorts
     +get() Promise~PedalboardReference | null~
     +save(newTitle?: string) Promise~PedalboardReference~
     +saveAs(suggestedTitle: string) Promise~PedalboardReference~
+  }
+
+  class PluginsApi {
+    +list() Promise~Plugin[]~
+  }
+  class Plugin {
+    +uri: string
+    +name: string
+    +label: string
+    +info() Promise~PluginInfo~
+  }
+  class PedalboardPlugins {
+    +list() Promise~PluginInstance[]~
+    +add(plugin: PluginTarget, position?: Position) Promise~PluginInstance~
+    +remove(instance) Promise~void~
+  }
+  class PedalboardConnections {
+    +list() Promise~PedalboardConnection[]~
+    +connect(from: Port | string, to: Port | string) Promise~PedalboardConnection~
+    +disconnect(connection: PedalboardConnection) Promise~void~
+  }
+  class PedalboardPorts {
+    +audio: PedalboardPortGroup
+    +midi: PedalboardPortGroup
+    +cv: PedalboardPortGroup
+    +list() Promise~Port[]~
+  }
+  class PedalboardPortGroup {
+    +input() Promise~Port[]~
+    +output() Promise~Port[]~
+  }
+  class PluginInstance {
+    +instance: string
+    +uri: string
+    +x: number
+    +y: number
+    +bypassed: boolean
+    +info: PluginInfo | null
+    +ports: PortGroups
+    +port(symbol) Port | undefined
+    +remove() Promise~void~
+  }
+  class Port {
+    +id: string
+    +symbol: string
+    +name: string
+    +type: audio | midi | cv
+    +direction: input | output
+    +owner: PluginInstance | null
+  }
+  class PedalboardConnection {
+    +from: Port
+    +to: Port
+    +id: string
+  }
+  class PedalboardGraph {
+    <<internal>>
+  }
+  class GraphState {
+    <<internal>>
+    +ready() Promise~GraphModel~
   }
 
   class EventChannel {
@@ -303,12 +449,30 @@ classDiagram
     +webSocket?: WebSocketLike
     +loadTimeoutMs?: number
     +connectTimeoutMs?: number
+    +graphTimeoutMs?: number
   }
 
   ModUiClient *-- PedalboardsApi
   ModUiClient *-- Device
   ModUiClient *-- EventChannel
   Device *-- CurrentPedalboard
+  Device *-- PluginsApi : plugins
+  PluginsApi ..> Plugin : creates
+  CurrentPedalboard *-- PedalboardPlugins : plugins
+  CurrentPedalboard *-- PedalboardConnections : connections
+  CurrentPedalboard *-- PedalboardPorts : ports
+  PedalboardPorts *-- PedalboardPortGroup : audio, midi, cv
+  PedalboardPlugins --> PedalboardGraph
+  PedalboardConnections --> PedalboardGraph
+  PedalboardPorts --> PedalboardGraph
+  PedalboardGraph --> GraphState : reads
+  PedalboardGraph --> EventChannel : waits for add, remove, connect, disconnect
+  PedalboardGraph --> PluginsApi : plugin descriptions
+  PedalboardGraph ..> PluginInstance : creates
+  PedalboardGraph ..> PedalboardConnection : creates
+  PluginInstance *-- "*" Port : ports.audio.input, .audio.output, .midi.*, .cv.*
+  PedalboardConnection --> Port : from, to
+  GraphState --> EventChannel : on(...) before connect()
   ModUiClient ..> ModUiClientOptions : configured by
   ModUiClient ..> HttpTransport : creates
   PedalboardsApi --> HttpTransport
@@ -377,7 +541,7 @@ classDiagram
     symbol: string
     value: number
   }
-  class PedalboardConnection {
+  class PedalboardInfoConnection {
     source: string
     target: string
   }
@@ -414,7 +578,7 @@ classDiagram
   PedalboardReference --> PedalboardSummary : summary
   PedalboardReference ..> PedalboardInfo : info()
   PedalboardInfo *-- "*" PedalboardPlugin : plugins
-  PedalboardInfo *-- "*" PedalboardConnection : connections
+  PedalboardInfo *-- "*" PedalboardInfoConnection : connections
   PedalboardInfo *-- PedalboardHardware : hardware
   PedalboardInfo *-- PedalboardTimeInfo : timeInfo
   PedalboardPlugin *-- "*" PedalboardPluginPort : ports
@@ -625,7 +789,55 @@ sequenceDiagram
 With a **shared** socket (`options.webSocket`), `connect()` resolves as soon as the socket is open and the
 client never answers `ping` / `data_ready`, because the socket's owner (the classic UI's `host.js`) already does.
 
-### 5.6 EventChannel lifecycle
+### 5.6 Live editing: the graph model, `plugins.add`, `connections.connect`
+
+No HTTP endpoint lists the plugins or the connections of the running pedalboard, so `GraphState` registers `on(...)`
+handlers **before** the socket is opened and builds a model from the frames: the state replay of a new socket
+(`add_hw_port`, `add`, `connect`, ...) and the live ones after it. `loading_start` and `remove :all` clear the
+plugins and connections (the pedalboard's own ports stay: a load does not send them again).
+With a shared socket the replay has already passed, so `ready()` reads one snapshot through a short-lived second
+socket (frames that arrive meanwhile are applied on top of it).
+
+Port ids come from two places: plugin ports from `PluginInfo.ports` (`audio`, `midi`, `cv`; control ports are not
+connectable), fetched with one `POST /effect/bulk/` for the plugins not seen yet; the pedalboard's own ports from
+`add_hw_port`, where the backend's "input of the device" (`direction 0`) is a *source* for the graph.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant App
+  participant G as PedalboardGraph (device queue)
+  participant S as GraphState / model
+  participant E as EventChannel
+  participant H as HttpTransport
+  participant B as mod-ui backend
+
+  App->>G: plugins.add(plugin, {x, y})
+  G->>S: ready() (connect, replay seen)
+  G->>G: generateInstance(uri) -> "/graph/Gain"
+  G->>E: waitFor("add", instance)
+  G->>H: GET /effect/add//graph/Gain?uri&x&y
+  H->>B: request
+  B-->>E: add /graph/Gain <uri> x y ...
+  E->>S: model.apply(add)
+  E-->>G: waiter resolved
+  B-->>H: PluginInfo (or false)
+  G-->>App: PluginInstance (ports from PluginInfo)
+
+  App->>G: connections.connect(from, to)
+  G->>G: both ports exist? from=output, to=input, same type?
+  alt invalid, or already connected
+    G-->>App: ModUiError / the existing PedalboardConnection (no request)
+  else valid
+    G->>E: waitFor("connect", "from to")
+    G->>H: GET /effect/connect/{from},{to}
+    B-->>E: connect from to
+    B-->>H: true
+    G-->>App: PedalboardConnection
+  end
+```
+
+### 5.7 EventChannel lifecycle
 
 ```mermaid
 stateDiagram-v2
@@ -644,7 +856,7 @@ stateDiagram-v2
 ## 6. Design rules
 
 - **Classes per feature area**, reachable from `ModUiClient` (`client.pedalboards`, `client.device`,
-  `client.events`). New areas (snapshots, banks, plugins, ...) follow the same shape.
+  `client.events`). New areas (snapshots, banks, ...) follow the same shape.
 - **All HTTP goes through `HttpTransport`**: `fetch` with `cache: 'no-store'`, JSON decoding, non-2xx →
   `ModUiHttpError`. Use `getJson` for `GET` and `postForm` for form posts; add a method there if a new body
   type is needed (e.g. JSON or binary).
@@ -717,5 +929,10 @@ must run the build before installing `html/` (`setup.py` and `mod-deploy.sh` pic
 - `currentPedalboard.get()` / `save()` rely on `GET /pedalboard/current`, added together with this API; they do not
   work against older mod-ui servers.
 - `currentPedalboard.save()` / `saveAs()` wait for the thumbnail regeneration, which can take a few seconds on a device (the renderer runs at low priority); a failure of that wait is ignored.
+- Plugins and connections come from the WebSocket, not from an endpoint. After an own socket reconnects, pedalboard ports that disappeared in between stay in the model until the backend announces them again.
+- `PluginInstance` objects are snapshots: `x`, `y` and `bypassed` do not follow later changes (call `plugins.list()` again).
+- `plugins.add()` always generates the instance name (like the classic UI). If the backend creates the plugin but cannot read its description, it answers `404` and the plugin stays in the pedalboard.
+- `connections.disconnect()` checks the model first because the backend answers `true` and announces `disconnect` even when nothing was connected. A connection made by another client a moment ago is known as soon as its `connect` frame arrives.
+- Connections to plugins that are not installed are left out of `connections.list()` (their ports are unknown).
 - `reference.copy()` cannot choose the title of the copy and refuses titles with quotes, `/`, `&`, `\`, `*`, `[` or control characters, because of how the backend renames the copy.
 - A thumbnail URL is a snapshot: after another client regenerates the images, call `status()` (or `generate()`) on a reference to learn the new creation time, otherwise the URL may still hit the browser's one-year cache.

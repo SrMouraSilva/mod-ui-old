@@ -164,3 +164,76 @@ export function setupFakes(): void {
     vi.useRealTimers();
   });
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Plugins and graph
+// ---------------------------------------------------------------------------------------------------------------------
+
+export const gainUri = 'http://moddevices.com/plugins/mod-devel/Gain';
+export const midiUri = 'http://moddevices.com/plugins/mod-devel/MidiThru';
+
+function port(symbol: string, name: string, index: number) {
+  return { valid: true, index, symbol, name, shortName: name };
+}
+
+export const gainInfo = {
+  valid: true,
+  uri: gainUri,
+  name: 'Gain',
+  brand: 'MOD',
+  label: 'Gain',
+  comment: '',
+  buildEnvironment: '',
+  category: ['Utility'],
+  microVersion: 0,
+  minorVersion: 1,
+  release: 0,
+  builder: 0,
+  licensed: 0,
+  iotype: 1,
+  binary: '',
+  hasExternalUI: false,
+  version: '1.0',
+  stability: 'stable',
+  ports: {
+    audio: { input: [port('in', 'In', 0)], output: [port('out', 'Out', 0)] },
+    control: { input: [port('gain', 'Gain', 1)], output: [] },
+  },
+};
+
+export const midiInfo = {
+  ...gainInfo,
+  uri: midiUri,
+  name: 'MIDI Thru',
+  label: 'MidiThru',
+  ports: {
+    midi: { input: [port('midi_in', 'MIDI In', 0)], output: [port('midi_out', 'MIDI Out', 0)] },
+  },
+};
+
+export const pluginSummaries = [gainInfo, midiInfo].map(({ ports: _ports, binary: _b, ...summary }) => summary);
+
+/** Frames of a device with 2 audio inputs/outputs, one MIDI in and one MIDI out. */
+export const hardwareFrames = [
+  'add_hw_port /graph/capture_1 audio 0 Capture_1 1',
+  'add_hw_port /graph/capture_2 audio 0 Capture_2 2',
+  'add_hw_port /graph/playback_1 audio 1 Playback_1 1',
+  'add_hw_port /graph/playback_2 audio 1 Playback_2 2',
+  'add_hw_port /graph/midi_merger_out midi 0 All_MIDI_In 1',
+  'add_hw_port /graph/midi_broadcaster_in midi 1 All_MIDI_Out 1',
+];
+
+/**
+ * Opens the client's own socket and plays a state replay made of `frames` (between `loading_start` and
+ * `loading_end`, like the real one).
+ */
+export async function connectedWith(client: ModUiClient, frames: string[]): Promise<FakeWebSocket> {
+  const connecting = client.connect();
+  const socket = FakeWebSocket.instances[FakeWebSocket.instances.length - 1];
+  socket.open();
+  socket.emit('loading_start 0 0');
+  for (const frame of frames) socket.emit(frame);
+  socket.emit('loading_end 0');
+  await connecting;
+  return socket;
+}

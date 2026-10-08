@@ -104,10 +104,20 @@ Usage in the page (or in the browser console), where it is available as ``window
     await client.device.currentPedalboard.save();             // overwrite the running pedalboard
     await client.device.currentPedalboard.saveAs('My copy');  // save it as a new pedalboard
 
+    // Live editing of the running pedalboard
+    const gain = (await client.device.plugins.list()).find((plugin) => plugin.label === 'Gain');
+    const { plugins, connections, ports } = client.device.currentPedalboard;
+    const instance = await plugins.add(gain, { x: 200, y: 100 });
+    const [capture] = await ports.audio.output();    // ports of the pedalboard itself: audio/midi/cv x input()/output(), or ports.list()
+    const connection = await connections.connect(capture, instance.ports.audio.input[0]);   // output -> input, same type
+    await connections.disconnect(connection);
+    await plugins.remove(instance);
+
 From another origin or from Node, pass ``new ModUiClient({ baseUrl: 'http://modduo.local' })``.
 The developer guide, with architecture, class and sequence diagrams, is ``docs/modui-client.md``.
 Every public symbol is documented in the sources (TSDoc); the current scope (pedalboards) and the planned API
-are in ``docs/plans/2026-10-modui-client.md``.
+are in ``docs/plans/2026-10-modui-client-pedalboard.md`` (live editing of the running pedalboard:
+``docs/plans/2026-10-modui-client-pedalboard-graph.md``).
 
 Known limitation: when the client loads a pedalboard while the classic UI is open, the canvas reloads through the
 WebSocket, but the title shown by the classic UI is not updated.

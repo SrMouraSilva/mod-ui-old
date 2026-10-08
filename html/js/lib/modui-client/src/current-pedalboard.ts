@@ -9,12 +9,12 @@
 import { ModUiError } from './errors';
 import type { HttpTransport } from './http';
 import { waitForPendingImages } from './pedalboard-images';
+import { PedalboardConnections, PedalboardPorts } from './pedalboard-connections';
+import type { Enqueue, PedalboardGraph } from './pedalboard-graph';
+import { PedalboardPlugins } from './pedalboard-plugins';
 import { sameBundle } from './pedalboards';
 import type { PedalboardReference, PedalboardsApi } from './pedalboards';
 import type { CurrentPedalboardState, SavePedalboardResponse } from './types';
-
-/** Runs a task after the pending device operations (see `Device`), so a save never overlaps a load. */
-export type Enqueue = <T>(task: () => Promise<T>) => Promise<T>;
 
 /**
  * The pedalboard running on the device right now (`client.device.currentPedalboard`).
@@ -36,12 +36,24 @@ export type Enqueue = <T>(task: () => Promise<T>) => Promise<T>;
  * const copy = await device.currentPedalboard.saveAs('Solo');  // new bundle, "Solo (2)" if "Solo" exists
  */
 export class CurrentPedalboard {
+  /** The plugins in the pedalboard: list, add, remove. */
+  readonly plugins: PedalboardPlugins;
+  /** The connections between plugin ports and pedalboard ports: list, connect, disconnect. */
+  readonly connections: PedalboardConnections;
+  /** The inputs and outputs of the pedalboard itself, to connect plugins to. */
+  readonly ports: PedalboardPorts;
+
   /** @internal Use `client.device.currentPedalboard`. */
   constructor(
     private readonly http: HttpTransport,
     private readonly pedalboards: PedalboardsApi,
     private readonly enqueue: Enqueue,
-  ) {}
+    graph: PedalboardGraph,
+  ) {
+    this.plugins = new PedalboardPlugins(graph);
+    this.connections = new PedalboardConnections(graph);
+    this.ports = new PedalboardPorts(graph);
+  }
 
   /**
    * The library entry of the running pedalboard, or `null` when it is untitled (after `device.reset()`, after

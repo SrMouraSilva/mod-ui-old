@@ -68,6 +68,11 @@ export class EventChannel {
     this.owned = shared === undefined;
   }
 
+  /** True when the client opened the socket itself (not shared through `options.webSocket`). */
+  get ownsSocket(): boolean {
+    return this.owned;
+  }
+
   /** True when the socket is open and the initial state replay has been received. */
   get connected(): boolean {
     return this.synced && this.socket !== null && this.socket.readyState === WS_OPEN;

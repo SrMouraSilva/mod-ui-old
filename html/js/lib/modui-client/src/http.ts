@@ -30,6 +30,15 @@ export class HttpTransport {
     });
   }
 
+  /** `POST path` with a JSON body, decoded as JSON. */
+  postJson<T>(path: string, body: unknown): Promise<T> {
+    return this.request<T>(this.url(path), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  }
+
   /** Absolute URL of `path` (with the optional query string), e.g. to put in an `<img src>`. */
   url(path: string, query?: Query): string {
     const search = query ? toSearchParams(query).toString() : '';

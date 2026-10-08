@@ -1173,6 +1173,13 @@ paths:
         Creates the plugin (enabled, i.e. not bypassed) in mod-host and marks the pedalboard as modified (a screenshot is
         scheduled on the next save). Other sockets receive an `add` frame from the host layer. The response is the
         plugin description so the UI can build its block without another request.
+
+        Notes:
+        * The caller chooses the instance name (`/graph/<name>`); the backend does not make it unique. The classic UI
+          derives it from the last segment of the plugin URI and appends `_1`, `_2`, ... when taken.
+        * The `add` frame is pushed on the WebSocket **before** this response is written.
+        * The plugin is created in mod-host first and its description is read afterwards: if that fails the answer is
+          `404`, but the plugin stays in the pedalboard.
       parameters:
         - $ref: '#/components/parameters/InstancePath'
         - $ref: '#/components/parameters/PluginUri'
@@ -1205,7 +1212,10 @@ paths:
       tags: [Pedalboard graph]
       operationId: removePlugin
       summary: Remove a plugin from the running pedalboard
-      description: Also removes its connections; connected sockets receive `disconnect` and `remove` frames.
+      description: |
+        Also removes its connections and addressings. Connected sockets receive a `disconnect` frame for every
+        connection and then a `remove` frame, all **before** this response is written. Answers `false` when the instance
+        does not exist.
       parameters:
         - $ref: '#/components/parameters/InstancePath'
       responses:
@@ -1216,7 +1226,13 @@ paths:
       tags: [Pedalboard graph]
       operationId: connectPorts
       summary: Connect an output port to an input port
-      description: Ports are `<instance>/<symbol>` or hardware ports (`/graph/capture_1`, `/graph/playback_1`, ...). A `connect` frame is broadcast.
+      description: |
+        Ports are `<instance>/<symbol>` or hardware ports (`/graph/capture_1`, `/graph/playback_1`, ...). A `connect`
+        frame is broadcast, before the response is written.
+
+        The backend does not check direction or type: the first port is meant to be an output and the second an input of
+        the same type (the classic UI refuses other pairs, and so does the TypeScript client). When the connection
+        already exists the answer is `true` and **no frame is sent**.
       parameters:
         - name: port_from
           in: path
@@ -1234,7 +1250,9 @@ paths:
       tags: [Pedalboard graph]
       operationId: disconnectPorts
       summary: Remove a connection
-      description: A `disconnect` frame is broadcast.
+      description: |
+        A `disconnect` frame is broadcast. The answer is **always** `true`, and the frame is sent too, even when the
+        plugin, the ports or the connection do not exist, so `true` does not prove a connection was removed.
       parameters:
         - name: port_from
           in: path

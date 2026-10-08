@@ -9,8 +9,11 @@
 import { CurrentPedalboard } from './current-pedalboard';
 import { ModUiError } from './errors';
 import type { EventChannel } from './events';
+import { GraphState } from './graph-state';
 import type { HttpTransport } from './http';
+import { PedalboardGraph } from './pedalboard-graph';
 import type { PedalboardsApi } from './pedalboards';
+import type { PluginsApi } from './plugins';
 import type { LoadOptions, LoadResult, PedalboardTarget } from './types';
 
 /**
@@ -25,17 +28,26 @@ import type { LoadOptions, LoadResult, PedalboardTarget } from './types';
 export class Device {
   private queue: Promise<unknown> = Promise.resolve();
 
-  /** The pedalboard that is running now: find it and save it. */
+  /** The pedalboard that is running now: find it, save it, edit its plugins and connections. */
   readonly currentPedalboard: CurrentPedalboard;
+
+  /** The plugins installed on the device. */
+  readonly plugins: PluginsApi;
 
   /** @internal Use `client.device`. */
   constructor(
     private readonly http: HttpTransport,
     private readonly events: EventChannel,
     private readonly pedalboards: PedalboardsApi,
+    plugins: PluginsApi,
     private readonly defaultTimeoutMs: number,
+    graph: { confirmTimeoutMs: number; openSnapshotChannel: () => EventChannel | null },
   ) {
-    this.currentPedalboard = new CurrentPedalboard(http, pedalboards, (task) => this.enqueue(task));
+    this.plugins = plugins;
+    const enqueue = <T>(task: () => Promise<T>) => this.enqueue(task);
+    const state = new GraphState(events, graph.openSnapshotChannel);
+    const pedalboardGraph = new PedalboardGraph(http, events, state, plugins, enqueue, graph.confirmTimeoutMs);
+    this.currentPedalboard = new CurrentPedalboard(http, pedalboards, enqueue, pedalboardGraph);
   }
 
   /**
