@@ -15,6 +15,7 @@ function routes(extra: Record<string, unknown> = {}) {
     'GET /pedalboard/list': summaries,
     'GET /pedalboard/current': { bundlepath: myBundle, title: 'My Board', modified: true },
     'POST /pedalboard/save': { ok: true, bundlepath: myBundle, title: 'My Board' },
+    'GET /pedalboard/image/wait': { ok: true, ctime: '1760000000.0' },
     ...extra,
   };
 }
@@ -67,6 +68,7 @@ describe('client.device.currentPedalboard.save()', () => {
       'GET /pedalboard/current',
       'POST /pedalboard/save',
       'GET /pedalboard/list',
+      'GET /pedalboard/image/wait',
     ]);
     expect(formOf(calls[1].body)).toEqual({ title: 'My Board', asNew: '0' });
     expect(saved.bundlepath).toBe(myBundle);
@@ -76,7 +78,11 @@ describe('client.device.currentPedalboard.save()', () => {
     const { client, calls } = makeClient(routes());
     await client.device.currentPedalboard.save('Renamed');
 
-    expect(calls.map((c) => new URL(c.url).pathname)).toEqual(['/pedalboard/save', '/pedalboard/list']);
+    expect(calls.map((c) => new URL(c.url).pathname)).toEqual([
+      '/pedalboard/save',
+      '/pedalboard/list',
+      '/pedalboard/image/wait',
+    ]);
     expect(formOf(calls[0].body)).toEqual({ title: 'Renamed', asNew: '0' });
   });
 
@@ -124,24 +130,87 @@ describe('client.device.currentPedalboard.save()', () => {
 
 describe('client.device.currentPedalboard.saveAs()', () => {
   it('saves a new bundle (asNew=1) and returns it with the final title', async () => {
-    const created = { ...summaries[1], bundle: '/root/.pedalboards/Solo-2.pedalboard', title: 'Solo 2', version: 0 };
+    const created = { ...summaries[1], bundle: '/root/.pedalboards/Solo_2_.pedalboard', title: 'Solo (2)', version: 0 };
     const { client, calls } = makeClient(
       routes({
         'GET /pedalboard/list': [...summaries, created],
-        'POST /pedalboard/save': { ok: true, bundlepath: created.bundle, title: 'Solo 2' },
+        'POST /pedalboard/save': { ok: true, bundlepath: created.bundle, title: 'Solo (2)' },
       }),
     );
     const saved = await client.device.currentPedalboard.saveAs('Solo');
 
-    expect(calls.map((c) => new URL(c.url).pathname)).toEqual(['/pedalboard/save', '/pedalboard/list']);
+    expect(calls.map((c) => new URL(c.url).pathname)).toEqual([
+      '/pedalboard/save',
+      '/pedalboard/list',
+      '/pedalboard/image/wait',
+    ]);
     expect(formOf(calls[0].body)).toEqual({ title: 'Solo', asNew: '1' });
-    expect(saved.title).toBe('Solo 2');
+    expect(saved.title).toBe('Solo (2)');
     expect(saved.bundlepath).toBe(created.bundle);
   });
 
   it('rejects a blank title', async () => {
     const { client } = makeClient(routes());
     await expect(client.device.currentPedalboard.saveAs('')).rejects.toBeInstanceOf(ModUiError);
+  });
+});
+
+describe('saving waits for the thumbnail', () => {
+  /** Fetch route whose answer is released by the test. */
+  function gate() {
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => (release = resolve));
+    return { release, released };
+  }
+
+  for (const method of ['save', 'saveAs'] as const) {
+    it(`${method}() resolves only after the image wait finished, asking for the saved bundle`, async () => {
+      const { release, released } = gate();
+      const { client, calls } = makeClient(
+        routes({
+          'GET /pedalboard/image/wait': () => released.then(() => ({ ok: true, ctime: '1.0' })),
+        }) as Record<string, unknown>,
+      );
+      let done = false;
+      const saving = (method === 'save'
+        ? client.device.currentPedalboard.save()
+        : client.device.currentPedalboard.saveAs('My Board')
+      ).then((ref) => {
+        done = true;
+        return ref;
+      });
+      await flush();
+      await flush();
+
+      const waitCall = calls.find((c) => new URL(c.url).pathname === '/pedalboard/image/wait');
+      expect(waitCall).toBeDefined();
+      expect(new URL(waitCall!.url).searchParams.get('bundlepath')).toBe(myBundle);
+      expect(done).toBe(false);
+
+      release();
+      await expect(saving).resolves.toMatchObject({ bundlepath: myBundle });
+      expect(done).toBe(true);
+    });
+  }
+
+  it('still succeeds when nothing was generated (ok: false)', async () => {
+    const { client } = makeClient(routes({ 'GET /pedalboard/image/wait': { ok: false, ctime: '0.0' } }));
+    await expect(client.device.currentPedalboard.save()).resolves.toMatchObject({ bundlepath: myBundle });
+  });
+
+  it('still succeeds when the wait request itself fails', async () => {
+    const { client } = makeClient(
+      routes({ 'GET /pedalboard/image/wait': new Response('boom', { status: 500 }) }),
+    );
+    await expect(client.device.currentPedalboard.save()).resolves.toMatchObject({ bundlepath: myBundle });
+  });
+
+  it('does not wait when the save failed', async () => {
+    const { client, calls } = makeClient(
+      routes({ 'POST /pedalboard/save': { ok: false, bundlepath: null, title: 'My Board' } }),
+    );
+    await expect(client.device.currentPedalboard.save()).rejects.toThrow(/failed to save/);
+    expect(calls.some((c) => new URL(c.url).pathname === '/pedalboard/image/wait')).toBe(false);
   });
 });
 

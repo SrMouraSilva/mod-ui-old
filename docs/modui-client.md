@@ -10,7 +10,7 @@ backend has *really* finished them (for example, until a pedalboard is fully loa
 - **Wire contract**: [`docs/openapi.yml`](openapi.yml)
 - **Plan / roadmap**: [`docs/plans/2026-10-modui-client.md`](plans/2026-10-modui-client.md)
 
-Current scope: **pedalboards** (list, info, remove, load, load default, reset, get / save / save-as of the running pedalboard) plus raw WebSocket access.
+Current scope: **pedalboards** (list, info, copy, remove, images, load, load default, reset, get / save / save-as of the running pedalboard) plus raw WebSocket access.
 
 ---
 
@@ -33,11 +33,20 @@ await client.device.loadDefault();                      // the empty "Untitled" 
 const current = await client.device.currentPedalboard.get();   // PedalboardReference | null (null = untitled)
 await client.device.currentPedalboard.save();                  // overwrite it, keeping its title
 await client.device.currentPedalboard.save('New name');        // overwrite and rename
-const copy = await client.device.currentPedalboard.saveAs('Solo');  // new bundle ("Solo 2" if taken)
+const copy = await client.device.currentPedalboard.saveAs('Solo');  // new bundle ("Solo (2)" if taken)
 
 // Library management
 const mine = (await client.pedalboards.list()).filter((pb) => !pb.factory && !pb.isDefault);
 await mine[0].remove();                                 // throws ModUiError for factory / default pedalboards
+const duplicate = await mine[0].copy();                 // new pedalboard, "<title> (2)", running one untouched
+
+// Screenshot / thumbnail of any pedalboard of the library
+const images = pedalboards[0].images;
+img.src = images.getThumbnailUrl();                     // sync, no request
+if ((await images.status()) === ImageStatus.Missing) {  // or Generating / Available
+  await images.generate();                              // waits until the images exist
+  img.src = images.getThumbnailUrl();                   // new URL, bypasses the browser cache
+}
 ```
 
 Other setups:
@@ -117,6 +126,7 @@ html/js/lib/modui-client/
 │   ├── index.ts         # public exports + window.ModUiClient / window.ModUi (build entry)
 │   ├── client.ts        # ModUiClient, ModUiClientOptions
 │   ├── pedalboards.ts   # PedalboardsApi, PedalboardReference
+│   ├── pedalboard-images.ts   # PedalboardImages (reference.images), ImageStatus
 │   ├── device.ts        # Device
 │   ├── current-pedalboard.ts  # CurrentPedalboard (client.device.currentPedalboard)
 │   ├── events.ts        # EventChannel, MessageHandler, Waiting
@@ -128,6 +138,7 @@ html/js/lib/modui-client/
     ├── helpers.ts       # FakeWebSocket, fakeFetch, fixtures, makeClient, connected, flush
     ├── client.test.ts
     ├── pedalboards.test.ts
+    ├── pedalboard-images.test.ts
     ├── device.test.ts
     ├── current-pedalboard.test.ts
     └── events.test.ts
@@ -142,6 +153,7 @@ flowchart TD
   index --> current[current-pedalboard.ts]
   index --> pedalboards
   index --> events
+  index --> images[pedalboard-images.ts]
   index --> errors
   client --> device[device.ts]
   client --> pedalboards[pedalboards.ts]
@@ -157,6 +169,9 @@ flowchart TD
   device --> pedalboards
   device --> errors
   pedalboards --> http
+  pedalboards --> images
+  images --> http
+  images --> errors
   events --> errors
   http --> errors
   client -.-> runtime[runtime.ts]
@@ -200,8 +215,10 @@ classDiagram
     +hasTrialPlugins: boolean
     +version: number
     +summary: PedalboardSummary
+    +images: PedalboardImages
     +isDefault: boolean
     +info() Promise~PedalboardInfo~
+    +copy() Promise~PedalboardReference~
     +remove() Promise~void~
   }
 
@@ -212,6 +229,22 @@ classDiagram
     +load(target: PedalboardTarget, options?: LoadOptions) Promise~LoadResult~
     +loadDefault(options?: LoadOptions) Promise~LoadResult~
     +reset() Promise~void~
+  }
+
+  class PedalboardImages {
+    -ctime: string
+    +getThumbnailUrl() string
+    +getScreenshotUrl() string
+    +status() Promise~ImageStatus~
+    -waitPending() Promise~ImageStatus~
+    +generate() Promise~void~
+  }
+
+  class ImageStatus {
+    <<enumeration>>
+    Missing
+    Generating
+    Available
   }
 
   class CurrentPedalboard {
@@ -281,6 +314,10 @@ classDiagram
   PedalboardsApi --> HttpTransport
   PedalboardsApi ..> PedalboardReference : creates
   PedalboardReference --> HttpTransport
+  PedalboardReference *-- PedalboardImages : images
+  PedalboardImages --> HttpTransport
+  PedalboardImages ..> ImageStatus : returns
+  CurrentPedalboard ..> PedalboardImages : waits for the thumbnail after a save
   Device --> HttpTransport
   Device --> EventChannel
   Device --> PedalboardsApi : loadDefault()
@@ -467,6 +504,9 @@ sequenceDiagram
   S-->>CP: { ok, bundlepath, title }
   CP->>S: GET /pedalboard/list
   S-->>CP: PedalboardSummary[]
+  CP->>S: GET /pedalboard/image/wait?bundlepath=written bundle
+  Note over S: answers when the background job that<br/>regenerates screenshot and thumbnail is done
+  S-->>CP: { ok, ctime }
   CP-->>App: PedalboardReference of the written bundle
 ```
 
@@ -475,7 +515,7 @@ What the backend does with `asNew`:
 ```mermaid
 flowchart TD
   A["POST /pedalboard/save<br/>title, asNew"] --> B{asNew = 1?}
-  B -- yes --> N["Always a NEW bundle<br/>title made unique ('Solo' → 'Solo 2')"]
+  B -- yes --> N["Always a NEW bundle<br/>title made unique ('Solo' → 'Solo (2)')"]
   B -- no --> C{Running pedalboard has a bundle<br/>under ~/.pedalboards that exists?}
   C -- yes --> O["OVERWRITE that bundle<br/>title stored as given (rename), not made unique"]
   C -- no --> F{Factory pedalboard?}
@@ -486,10 +526,75 @@ flowchart TD
   K --> R
 ```
 
+The promise of `save()` / `saveAs()` resolves only after `GET /pedalboard/image/wait` answered, i.e. when the
+screenshot and the thumbnail that the save regenerates in the background are ready. The pedalboard is already
+saved at that point, so if the wait fails (or nothing could be rendered) the save is **not** reported as failed.
+
 `currentPedalboard.get()` returns `null` for an untitled pedalboard (after `reset()` or `loadDefault()`), because it
 has no bundle. It needs the backend endpoint `GET /pedalboard/current`.
 
-### 5.3 Connecting and flow control (`events.connect`)
+### 5.3 Copying a pedalboard (`reference.copy`)
+
+`GET /pedalboard/factorycopy/` is the only copy resource. Despite its name it copies **any** bundle (not only factory
+ones) and never touches the running pedalboard. The server chooses the new title (the old one made unique:
+`"Rock"` → `"Rock (2)"`, unchanged if free) and renames the copy by running `sed` through a shell with the title
+pasted in, so the title must be the one **stored in the bundle** and must not contain characters that break the
+shell or `sed`. The client therefore reads the stored title first and refuses unsafe ones before copying.
+`copy()` takes no title: the title of the copy cannot be chosen without changing the backend (see the plan).
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant App
+  participant R as PedalboardReference
+  participant S as mod-ui server
+
+  App->>R: copy()
+  R->>S: GET /pedalboard/info/?bundlepath=…
+  S-->>R: PedalboardInfo (title stored in the bundle)
+  alt blank title, or a refused character (quotes, slash, ampersand, backslash, asterisk, bracket, control)
+    R-->>App: ModUiError (no copy request is made)
+  else
+    R->>S: GET /pedalboard/factorycopy/?bundlepath=…&title=stored title
+    Note over S: copytree into ~/.pedalboards, title made unique,<br/>sed renames it inside the copy, list cache refreshed
+    S-->>R: PedalboardInfo of the copy + bundlepath, or false
+    R->>S: GET /pedalboard/list
+    S-->>R: PedalboardSummary[]
+    R-->>App: PedalboardReference of the copy (never factory)
+  end
+```
+
+Pedalboards whose title has a refused character can only be duplicated with `device.load(ref)` followed by
+`device.currentPedalboard.saveAs(title)`, which **replaces** the running pedalboard.
+
+### 5.4 Pedalboard images (`reference.images`)
+
+The files `screenshot.png` / `thumbnail.png` live inside each bundle. They are rendered by a background process
+from the **saved bundle** (so never from the running state), after a save that changed the graph or on demand.
+The endpoints work for **any** bundle, not only the running pedalboard. Image URLs are cached for a year by the
+server, so the client adds `v=<pedalboard version>` and, once known, `tstamp=<creation time>`.
+
+```mermaid
+flowchart TD
+  U["getThumbnailUrl() / getScreenshotUrl()<br/>sync, no request"] --> IMG["GET /pedalboard/image/{kind}.png<br/>bundlepath, v, tstamp"]
+  IMG -- "file exists" --> OK[200 PNG]
+  IMG -- "never generated" --> NF[404]
+  NF --> ST["status()<br/>GET /pedalboard/image/check"]
+  ST -- Missing --> GEN["generate()"]
+  ST -- Generating --> POLL["call status() again later"]
+  ST -- Available --> OK
+  GEN --> G1["GET /pedalboard/image/generate<br/>(answers when the job finished)"]
+  G1 -- "ok" --> WP2["GET /pedalboard/image/wait<br/>(internal waitPending)"]
+  G1 -- "not ok" --> ERR[ModUiError]
+  WP2 --> DONE["images ready: ctime remembered,<br/>URLs get a new tstamp"]
+```
+
+`generate()` replaces the files, so it fails for factory pedalboards on a device (read-only filesystem) with a `ModUiError`.
+
+`waitPending()` is private to `PedalboardImages`. `generate()` always ends with it, and so do `currentPedalboard.save()`
+and `saveAs()` (see 5.2), through an internal helper that the package does not export.
+
+### 5.5 Connecting and flow control (`events.connect`)
 
 A new socket first receives a replay of the whole current state, which ends with `loading_end`. `connect()`
 resolves only after it, so that replay is never mistaken for the end of a load requested later.
@@ -520,7 +625,7 @@ sequenceDiagram
 With a **shared** socket (`options.webSocket`), `connect()` resolves as soon as the socket is open and the
 client never answers `ping` / `data_ready`, because the socket's owner (the classic UI's `host.js`) already does.
 
-### 5.4 EventChannel lifecycle
+### 5.6 EventChannel lifecycle
 
 ```mermaid
 stateDiagram-v2
@@ -611,4 +716,6 @@ must run the build before installing `html/` (`setup.py` and `mod-deploy.sh` pic
   does not update them, so after `currentPedalboard.save*()` the classic UI may still show the old name until reload.
 - `currentPedalboard.get()` / `save()` rely on `GET /pedalboard/current`, added together with this API; they do not
   work against older mod-ui servers.
-- Saving does not wait for the thumbnail: it is regenerated in the background (`/pedalboard/image/*`).
+- `currentPedalboard.save()` / `saveAs()` wait for the thumbnail regeneration, which can take a few seconds on a device (the renderer runs at low priority); a failure of that wait is ignored.
+- `reference.copy()` cannot choose the title of the copy and refuses titles with quotes, `/`, `&`, `\`, `*`, `[` or control characters, because of how the backend renames the copy.
+- A thumbnail URL is a snapshot: after another client regenerates the images, call `status()` (or `generate()`) on a reference to learn the new creation time, otherwise the URL may still hit the browser's one-year cache.

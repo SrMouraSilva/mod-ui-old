@@ -79,7 +79,7 @@ export function fakeFetch(routes: Record<string, unknown | ((call: Call) => unkn
     if (route === undefined) {
       return new Response('<html>404: Not Found</html>', { status: 404 });
     }
-    const value = typeof route === 'function' ? (route as (c: Call) => unknown)(call) : route;
+    const value = await (typeof route === 'function' ? (route as (c: Call) => unknown)(call) : route);
     if (value instanceof Response) return value;
     return new Response(JSON.stringify(value), { status: 200 });
   });

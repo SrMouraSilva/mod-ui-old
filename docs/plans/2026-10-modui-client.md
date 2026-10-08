@@ -20,6 +20,17 @@ await device.load(pedalboard);   // resolves only after WS "loading_end"
 await device.loadDefault();      // bundlepath inferred from the list
 ```
 
+## Backend change policy (decided 2026-10-07)
+The aim is to **avoid editing the Python backend**. Whenever a feature of `modui-client` seems to need a backend change
+(new endpoint, new argument, changed behaviour, fix), the assistant must **stop and ask the user for confirmation first**,
+explaining why and what the alternatives are, and must record the answer here. Until confirmed, work around the limit in
+the client and document it in `docs/openapi.yml`. The rule is also in `CLAUDE.md`.
+
+| Date | Change | Decision |
+|------|--------|----------|
+| 2026-10-07 | `GET /pedalboard/current` (`PedalboardCurrent` in `mod/webserver.py`) | Added before this policy; it is in the user's commit `0b025060` and was **kept** |
+| 2026-10-07 | `GET /pedalboard/factorycopy/`: optional `newtitle` + rename in Python instead of `sed` (to allow `copy(title)`) | **Refused by the user and reverted** (revision 6): no custom title for `copy()` |
+
 ## Key backend facts the design relies on
 - `GET /pedalboard/list` → `PedalboardSummary[]`; the default pedalboard has `bundle` ending in
   `/default.pedalboard` and `title: "Default"` (`mod/webserver.py` PedalboardList).
@@ -46,9 +57,11 @@ await device.loadDefault();      // bundlepath inferred from the list
 | `CLAUDE.md` | new, English (content below) |
 | `openapi.yml` → `docs/openapi.yml` | `git mv`; all references (CLAUDE.md, README, TSDoc) point to `docs/openapi.yml` |
 | `docs/plans/2026-10-modui-client.md` | new – copy of this plan (for the team's review) |
+| `docs/modui-client.md` | new – developer guide with Mermaid diagrams |
 
-No backend change; the OpenAPI content is unchanged (no new endpoints). The "suggestions" section below is
-**documentation only**: those methods are not implemented in this iteration.
+First iteration: no backend change (a later one added `GET /pedalboard/current`, see "Revisions" and "Backend change policy"). The files above
+are the initial layout; the sources were split into modules under `src/` (see "Revisions"). The "suggestions" section
+below is **documentation only**.
 
 ## `modui-client.ts` design
 Build: `esbuild modui-client.ts --bundle --format=iife --target=es2018 --outfile=../modui-client.js`
@@ -101,20 +114,49 @@ desktop title/bundle state (set only from the HTTP response in `desktop.loadPeda
 with a backend broadcast (suggestion below).
 
 ## Suggestions for the remaining pedalboard endpoints (for review, not implemented)
+Implemented since the first draft: `device.currentPedalboard.get/save/saveAs`, `reference.remove()`,
+`reference.images` and `reference.copy()` (see "Revisions"). Still open:
+
 | API | Endpoint | Notes |
 |-----|----------|-------|
-| `device.save(title?, { asNew })` → `PedalboardReference` | `POST /pedalboard/save` | optional `waitThumbnail` using `image/wait` |
-| `device.loadArchive(blob)` | `POST /pedalboard/load_web/` | reset first + await `loading_end`, like `load` |
 | `device.transport.setSyncMode('none'\|'midi_clock_slave'\|'link')` | `POST /pedalboard/transport/set_sync_mode/{mode}` | await WS `transport` |
-| `reference.remove()` | `GET /pedalboard/remove/` | refuse for factory/default |
-| `reference.copyToUser(title?)` → `PedalboardReference` | `GET /pedalboard/factorycopy/` | only when `factory` |
-| `reference.download(): Promise<Blob>` | `GET /pedalboard/pack_bundle/` | |
-| `reference.thumbnailUrl` / `screenshotUrl` (sync getters, `v=version`) | `/pedalboard/image/{kind}.png` | |
-| `reference.images.check() / generate() / waitPending()` | `/pedalboard/image/check\|generate\|wait` | |
 | `client.pedalboards.get(bundlepath)` → `PedalboardInfo` | `/pedalboard/info/` | without listing |
 | `device.on('loading' \| 'snapshot' \| ...)` typed events | WS `loading_start/end`, `pedal_snapshot` | typed layer over `events.on` |
 | `device.cv.addPluginPort / removePluginPort` | `/pedalboard/cv_addressing_plugin_port/*` | better in a future "addressing" area |
-| Backend: `GET /pedalboard/current` + WS `pedalboard_loaded <bundlepath> <title>` | new | fixes the limitation above; would allow `device.current` |
+| Backend: WS `pedalboard_loaded <bundlepath> <title>` | new | would let the classic UI follow loads/saves made by the client (see "Known limitation"); **needs the user's confirmation** (backend change policy) |
+
+### `client.cloud` (decision: cloud-related endpoints live in `modUiClient.cloud` for now)
+Everything that exists only because of the MOD cloud (mod.audio) goes into a dedicated area, `client.cloud`
+(`src/cloud.ts`, class `Cloud`), instead of `device` / `pedalboards`. It will be split later if it grows.
+Candidates (all proposals, for review; nothing is implemented):
+
+| API | Endpoint | Notes |
+|-----|----------|-------|
+| `cloud.loadPedalboardArchive(blob)` | `POST /pedalboard/load_web/` | the cloud pedalboard download is uploaded here; same reset → load → `loading_end` flow as `device.load` |
+| `cloud.packPedalboard(reference): Promise<Blob>` | `GET /pedalboard/pack_bundle/` | `.tar.gz` made to share a pedalboard in the cloud; includes `audio.ogg` when a recording exists |
+| `cloud.requestRemoteLoad(pedalboardId)` | `POST /pedalboard/load_remote/{id}` | asks the open UI to download a cloud pedalboard (`load-pb-remote` WS message); `false` without a UI |
+| `cloud.hello()` | `GET /hello` | `{ online, version }`, discovery probe used by mod.audio pages |
+| `cloud.auth.createMessage(nonce)` / `cloud.auth.decryptToken(response)` | `POST /auth/nonce`, `POST /auth/token` | device authentication handshake; tokens are never stored by the server |
+| `cloud.tokens.get() / save() / delete()` | `/tokens/get`, `/tokens/save`, `/tokens/delete` | tokens kept in `tokens.conf` |
+| `cloud.installPackage(blob)` | `POST /effect/install/` | plugin package downloaded from the cloud (plugins area later) |
+| `cloud.uploadOsUpdate(blob)` / `cloud.beginOsUpdate()` | `/update/download/`, `/update/begin` | OS update flow (belongs to a future "system" area, listed here because the file comes from the cloud) |
+
+Not part of the client: the browser's direct calls to the cloud servers (`SITEURL`, `CLOUD_URL`, ...) and the
+`/rpbsocket` / `/rplsocket` sockets, which are opened *by cloud pages towards the device*.
+
+### Copying a pedalboard (`reference.copy()`, implemented in revision 4)
+`GET /pedalboard/factorycopy/` is the only copy resource, and it does **not** require a factory pedalboard nor the
+running one: it `copytree`s any existing bundle into `~/.pedalboards` (thumbnail, snapshots and addressings included).
+The server makes the title unique (`"Rock"` → `"Rock (2)"`, unchanged if free) and renames the copy with `sed` through a
+shell, which needs `title` to be the title **stored in the bundle**. Consequences for the client: `copy()` takes no title
+(sending another one leaves the old name in the files while the response says the new one), and it refuses titles that
+break the shell/`sed`. A custom title would need a backend change; it was proposed and **refused** (see "Backend change policy").
+
+### Notes on `/pedalboard/image/{kind}.png` (answer to a review question)
+It is **not** limited to the running pedalboard: it serves `<bundlepath>/<kind>.png` of any bundle path it is given
+(the server does not even check that it is a pedalboard). The images are generated by a background process from the
+**saved bundle**, when a pedalboard is saved after its graph changed or via `/pedalboard/image/generate`, so unsaved
+edits never show up and a bundle without images answers `404`. `docs/openapi.yml` was updated accordingly.
 
 ## Verification
 1. `cd html/js/lib/modui-client && npm install && npm test` – typecheck + all unit tests green.
@@ -130,3 +172,72 @@ with a backend broadcast (suggestion below).
   `client.ts`, `pedalboards.ts`, `device.ts`, `events.ts`, `http.ts`, `errors.ts`, `types.ts`, `runtime.ts`);
   tests split per area under `test/` with shared fakes in `test/helpers.ts`; `noUnusedLocals` enabled.
   Developer guide with Mermaid diagrams added at `docs/modui-client.md`. Node.js >= 22.12 (vitest 5).
+
+- **2026-10-07 (2)** — Pedalboard saving and removal.
+  - `device.currentPedalboard` (`src/current-pedalboard.ts`, class `CurrentPedalboard`):
+    `get(): Promise<PedalboardReference | null>` (null when untitled), `save(newTitle?)` (`asNew=0`, keeps the
+    current title when omitted, renames when given; untitled + no title → `ModUiError`), `saveAs(suggestedTitle)`
+    (`asNew=1`; the backend makes the title unique, so read the real one from the result). Both return the saved
+    `PedalboardReference`, found in `GET /pedalboard/list`. They run through the `Device` queue, so they never overlap
+    a load/reset.
+  - `PedalboardReference.remove()`: throws `ModUiError` for factory and default pedalboards before any request,
+    and when the backend answers `false`. The default pedalboard is refused too (the classic UI never offers it).
+  - **Backend change** (the only one): `GET /pedalboard/current` → `{ bundlepath, title, modified }`
+    (`PedalboardCurrent` in `mod/webserver.py`), because the running pedalboard was only exposed inside the rendered
+    index page. Documented in `docs/openapi.yml` (`getCurrentPedalboard`).
+  - Public methods now return rejected promises instead of throwing synchronously for bad arguments.
+  - `docs/openapi.yml`: `asNew` of `POST /pedalboard/save` explained with a decision table; image endpoints and
+    `/pedalboard/remove/` documented as working on any bundle path without validation.
+  - Decision: cloud-related endpoints go to `client.cloud` (see above).
+
+- **2026-10-07 (3)** — Pedalboard images: `reference.images` (`src/pedalboard-images.ts`, class `PedalboardImages`,
+  enum `ImageStatus` = `missing` | `generating` | `available`).
+  - `getThumbnailUrl()` / `getScreenshotUrl()` are synchronous (no request); the URL carries `v=<version>` and, once
+    known from `status()` / `waitPending()` / `generate()`, `tstamp=<creation time>` to bypass the one-year server cache.
+  - `status()` wraps `GET /pedalboard/image/check`; `waitPending()` (public too) wraps `GET /pedalboard/image/wait`.
+  - `generate()` calls `GET /pedalboard/image/generate` and then `waitPending()`, as requested. At the moment the
+    backend answers `generate` only when the job finished, so the extra `wait` returns at once; it is kept so the
+    method stays correct if the backend ever answers earlier. Fails with `ModUiError` when not generated.
+  - Fix: the backend makes titles unique as `"Name (2)"`, not `"Name 2"`; docs and tests corrected.
+  - `docs/openapi.yml`: `factorycopy` documented as working for any bundle, with how the title is chosen and the
+    shell-injection / `sed` caveat. `reference.copy()` is only a proposal (see "Copying a pedalboard").
+
+- **2026-10-07 (4)** — `waitPending()` made private; saves wait for the thumbnail; `reference.copy()`.
+  - `PedalboardImages.waitPending()` is now `private`. TypeScript has no package-private visibility, so the logic lives in
+    an internal function, `waitForPendingImages(http, bundlepath)` (`src/pedalboard-images.ts`, not exported from
+    `index.ts`), used by the private method and by `CurrentPedalboard`.
+  - `currentPedalboard.save()` / `saveAs()` always end with `GET /pedalboard/image/wait` for the written bundle and
+    resolve only afterwards (the background job is queued before the save answers, so there is no race). The wait is best
+    effort: if it fails, or nothing could be rendered, the save is still reported as successful because the
+    pedalboard is already stored. This supersedes the `waitThumbnail` option that was listed as a suggestion.
+  - `reference.copy()` implemented as the "no backend change" proposal: reads the title stored in the bundle with
+    `GET /pedalboard/info/`, refuses blank titles and titles with quotes, `/`, `&`, `\`, `*`, `[` or control characters (no
+    copy request is made), calls `GET /pedalboard/factorycopy/`, and returns the new `PedalboardReference` found in the
+    list. The new title is chosen by the server (`"Rock (2)"`). Backend improvement still open: rewrite the `.ttl` in
+    Python instead of `os.system('sed ...')` and accept a `newtitle` argument; the guard can then be dropped.
+
+- **2026-10-07 (5)** — `reference.copy(title?)`: optional title of the copy.
+  - A custom title cannot be done in the client alone: `factorycopy` renamed the copy with `sed` run through a shell and
+    needed `title` to be the source's stored name. Renaming afterwards is impossible too (no endpoint renames a pedalboard
+    that is not the running one, and `load` + `save` would replace it). So this is the second **backend change**.
+  - Backend: `GET /pedalboard/factorycopy/` accepts an optional `newtitle` (wished title, made unique like before);
+    `title` becomes optional and deprecated (older clients still send it, as the wished title); with neither, the copy keeps
+    the source's title, read from the bundle. The `os.system('sed ...')` is gone: `rename_pedalboard_bundle()`
+    (`mod/__init__.py`) rewrites `doap:name` in the `.ttl` files in Python, so no title reaches a shell. This fixes the
+    command injection documented in revision 4. Unit tests: `test/test_rename_pedalboard_bundle.py`
+    (`python3 -m unittest discover -s test -p "test_*.py"`).
+  - Client: `copy(title?)` sends `newtitle` only when given, rejects blank titles, accepts any characters, and no longer
+    calls `GET /pedalboard/info/` nor refuses unsafe characters (that guard existed only because of the `sed`).
+    Against an older server the title is ignored.
+  - `docs/openapi.yml`: `copyFactoryPedalboard` documents `newtitle`, the deprecated `title` and the history.
+
+- **2026-10-07 (6)** — Revision 5 reverted; backend change policy.
+  - The user asked to undo revision 5 and to avoid editing the backend. Reverted: `mod/__init__.py`
+    (`rename_pedalboard_bundle`), `mod/webserver.py` (`PedalboardFactoryCopy` is back to the original, with `sed` and a required
+    `title`), `test/test_rename_pedalboard_bundle.py` (deleted). `GET /pedalboard/current` is **not** touched: it is part of
+    the user's commit.
+  - `reference.copy()` is back to the revision 4 behaviour: no title argument; reads the title stored in the bundle with
+    `GET /pedalboard/info/`; refuses blank titles and titles with quotes, `/`, `&`, `\`, `*`, `[` or control characters;
+    calls `GET /pedalboard/factorycopy/`. `docs/openapi.yml` (`copyFactoryPedalboard`) and `docs/modui-client.md` match.
+  - New rule (see "Backend change policy" and `CLAUDE.md`): ask the user before any backend change and record the decision here.
+

@@ -54,6 +54,13 @@ or a WebSocket message (`msg_callback`/`write_message` in `mod/host.py`, `mod/se
 4. Update `docs/modui-client.md` (including its Mermaid diagrams) and the README section
    "TypeScript client (modui-client)" when the API or its usage changes.
 
+### Do not change the backend without asking
+The goal is to leave the Python backend as it is. When building `modui-client`, work around backend limits in the client
+and document them in `docs/openapi.yml` and in the plan. **If a feature seems to need a backend change (a new endpoint, a
+new argument, a changed behaviour, a fix), stop and ask the user for confirmation first, explaining why**, and record the
+decision (confirmed or refused) in `docs/plans/2026-10-modui-client.md`. Never edit `mod/`, `modtools/` or `utils/` on your
+own for the client's sake.
+
 ### TypeScript client conventions
 - One module per concern in `src/` (`client.ts`, `pedalboards.ts`, `device.ts`, `events.ts`, `http.ts`,
   `errors.ts`, `types.ts`, `runtime.ts`); `src/index.ts` is the build entry, re-exports the public API and sets

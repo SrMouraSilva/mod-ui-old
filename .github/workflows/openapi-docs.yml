@@ -1,0 +1,66 @@
+# Publishes docs/openapi.yml as a Redoc single-page app on GitHub Pages.
+#
+# Pull requests only lint the contract. A push to master (or a manual run)
+# also builds the static page and deploys it.
+#
+# One-time setup in the repository: Settings -> Pages -> Source: "GitHub Actions".
+
+name: openapi-docs
+
+on:
+  push:
+    branches: [feature/docs-api]
+    paths:
+      - docs/openapi.yml
+      - .github/workflows/openapi-docs.yml
+  pull_request:
+    paths:
+      - docs/openapi.yml
+      - .github/workflows/openapi-docs.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    name: lint and build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # Same skipped rules as documented in CLAUDE.md: they flag real routes.
+      - name: Lint the OpenAPI contract
+        run: >
+          npx --yes @redocly/cli@latest lint docs/openapi.yml
+          --skip-rule=no-path-trailing-slash
+          --skip-rule=operation-2xx-response
+          --skip-rule=operation-4xx-response
+          --skip-rule=no-unused-components
+      - name: Build the Redoc page
+        run: >
+          npx --yes @redocly/cli@latest build-docs docs/openapi.yml
+          --output _site/index.html
+      - uses: actions/upload-pages-artifact@v3
+        if: github.event_name != 'pull_request'
+
+  deploy:
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-22.04
+    name: deploy to GitHub Pages
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

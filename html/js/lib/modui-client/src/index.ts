@@ -32,6 +32,7 @@
  * | `pedalboards.ts` | {@link PedalboardsApi} (`client.pedalboards`), {@link PedalboardReference} |
  * | `device.ts` | {@link Device} (`client.device`) — load / reset the running pedalboard |
  * | `current-pedalboard.ts` | {@link CurrentPedalboard} (`client.device.currentPedalboard`) — get / save / saveAs |
+ * | `pedalboard-images.ts` | {@link PedalboardImages} (`reference.images`), {@link ImageStatus} — screenshot and thumbnail |
  * | `events.ts` | {@link EventChannel} (`client.events`) — the main WebSocket |
  * | `http.ts` | `HttpTransport` — internal `fetch` wrapper |
  * | `errors.ts` | {@link ModUiError}, {@link ModUiHttpError}, {@link ModUiTimeoutError} |
@@ -46,6 +47,7 @@ import { CurrentPedalboard } from './current-pedalboard';
 import { Device } from './device';
 import { ModUiError, ModUiHttpError, ModUiTimeoutError } from './errors';
 import { EventChannel } from './events';
+import { ImageStatus, PedalboardImages } from './pedalboard-images';
 import { PedalboardReference, PedalboardsApi } from './pedalboards';
 
 export { ModUiClient } from './client';
@@ -55,6 +57,7 @@ export { Device } from './device';
 export { ModUiError, ModUiHttpError, ModUiTimeoutError } from './errors';
 export { EventChannel } from './events';
 export type { MessageHandler, Waiting } from './events';
+export { ImageStatus, PedalboardImages } from './pedalboard-images';
 export { PedalboardReference, PedalboardsApi } from './pedalboards';
 export type { FetchLike, WebSocketFactory, WebSocketLike } from './runtime';
 export type * from './types';
@@ -70,6 +73,8 @@ if (typeof window !== 'undefined') {
     ModUiTimeoutError,
     PedalboardReference,
     PedalboardsApi,
+    PedalboardImages,
+    ImageStatus,
     Device,
     CurrentPedalboard,
     EventChannel,

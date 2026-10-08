@@ -138,6 +138,21 @@ export interface SavePedalboardResponse {
   title: string;
 }
 
+/** Answer of `GET /pedalboard/image/check` (operationId `checkPedalboardImage`). */
+export interface ImageCheckResponse {
+  /** `-1` no thumbnail, `0` generation queued or running, `1` available. */
+  status: -1 | 0 | 1;
+  /** Creation time of the thumbnail (Unix seconds, one decimal) or `"0.0"`. */
+  ctime: string;
+}
+
+/** Answer of `GET /pedalboard/image/generate` and `/wait` (schema `ImageJobResult`). */
+export interface ImageJobResponse {
+  ok: boolean;
+  /** Creation time of the thumbnail (Unix seconds, one decimal), `"0.0"` on failure. */
+  ctime: string;
+}
+
 /** Anything {@link Device.load} accepts: a bundle path, a {@link PedalboardReference} or a {@link PedalboardInfo}. */
 export type PedalboardTarget = string | { readonly bundlepath: string };
 

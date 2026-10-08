@@ -30,7 +30,8 @@ export class HttpTransport {
     });
   }
 
-  private url(path: string, query?: Query): string {
+  /** Absolute URL of `path` (with the optional query string), e.g. to put in an `<img src>`. */
+  url(path: string, query?: Query): string {
     const search = query ? toSearchParams(query).toString() : '';
     return this.baseUrl + path + (search ? '?' + search : '');
   }

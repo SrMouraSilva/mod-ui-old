@@ -1495,7 +1495,7 @@ paths:
         | `0` — *Save* | Loaded from a user bundle (`~/.pedalboards/...`) that still exists | **The same bundle**, overwritten | `title` is stored as is (this also renames the pedalboard). It is **not** made unique. |
         | `0` — *Save* | A **factory** pedalboard (read-only, shipped with the device) | A **copy** in `~/.pedalboards`, with the same directory name as the factory one | Made unique among the user's pedalboards |
         | `0` — *Save* | Untitled / empty (no bundle yet), or the bundle is not under `~/.pedalboards` | A **new** bundle (same as `asNew=1`) | Made unique |
-        | `1` — *Save as* | Any | Always a **new** bundle named after the title (`<title simplified, max 16 chars>.pedalboard`; a random `-<number>` is appended if that directory exists) | Made unique: `"My Board"` becomes `"My Board 2"` if taken |
+        | `1` — *Save as* | Any | Always a **new** bundle named after the title (`<title simplified, max 16 chars>.pedalboard`; a random `-<number>` is appended if that directory exists) | Made unique: `"My Board"` becomes `"My Board (2)"` if taken |
 
         After saving, the running pedalboard **points to the written bundle**, so later `asNew=0` saves overwrite it.
         The title in the response is the final one; it can differ from the request only when a new bundle is created.
@@ -1678,17 +1678,39 @@ paths:
     get:
       tags: [Pedalboards]
       operationId: copyFactoryPedalboard
-      summary: Copy a factory pedalboard into the user's library
-      description: The new bundle gets a unique title and directory name.
+      summary: Copy a pedalboard bundle into the user's library
+      description: |
+        Despite its name it is **not limited to factory pedalboards**: it copies *any* existing bundle (the server only
+        checks that the path exists) with `copytree` into `~/.pedalboards`, including its thumbnail, snapshots and
+        addressings. It does not touch the running pedalboard, so it is the way to duplicate a pedalboard that is
+        not the current one. The classic UI only uses it for factory pedalboards.
+
+        How the copy is named (the caller cannot choose the new title):
+        - the new title is `title` made unique among the user's pedalboards: `"Rock"` becomes `"Rock (2)"` if the user
+          already has `"Rock"`, and stays `"Rock"` when it does not (typical for a factory pedalboard);
+        - the new directory is `<title simplified, max 16 chars>.pedalboard`, with a random `-<number>` appended if it exists;
+        - the title is rewritten inside the copy with `sed` (`doap:name "<title>"` → `doap:name "<new title>"`), so `title`
+          must be the **current title stored in the source bundle**. With any other value the copy keeps the
+          original name inside its files while the response (and the list, after a rescan) disagree.
+
+        **Security / robustness**: `title` is put into a shell command (`os.system`) without escaping. A title with a
+        single quote can break out of it (shell injection, on a server that has no authentication), and characters that
+        are special for `sed` (`/`, `&`, `\`, `*`, `[`) break or misapply the rename. Callers should refuse such
+        titles until the server stops using a shell.
       parameters:
         - $ref: '#/components/parameters/BundlePath'
         - name: title
           in: query
           required: true
+          description: >-
+            Title currently stored in the source bundle (used both as the base of the new unique title and as
+            the text to replace inside the copy).
           schema: { type: string }
       responses:
         "200":
-          description: The new pedalboard (`PedalboardInfo` plus `bundlepath`), or `false` when the source bundle does not exist.
+          description: >-
+            The new pedalboard (`PedalboardInfo` of the copy, plus its `bundlepath`, with `title` set to the final
+            unique title), or `false` when the source bundle does not exist. The pedalboard list is refreshed.
           content:
             application/json:
               schema:
