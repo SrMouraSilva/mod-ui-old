@@ -6,8 +6,14 @@
  * @module
  */
 
+import { ModUiError } from './errors';
 import type { HttpTransport } from './http';
 import type { PedalboardInfo, PedalboardSummary } from './types';
+
+/** Compares two bundle paths ignoring trailing slashes. */
+export function sameBundle(a: string, b: string): boolean {
+  return a.replace(/\/+$/, '') === b.replace(/\/+$/, '');
+}
 
 /** True for the bundle of the built-in default pedalboard (`<pedalboards dir>/default.pedalboard`). */
 function isDefaultBundle(bundlepath: string): boolean {
@@ -57,6 +63,36 @@ export class PedalboardReference {
       bundlepath: this.bundlepath,
     });
     return { ...info, bundlepath: this.bundlepath };
+  }
+
+  /**
+   * Deletes this pedalboard from the device (its bundle directory, and its entries in all banks).
+   *
+   * Only **user** pedalboards can be removed. The check is done here, before any request is sent:
+   * factory pedalboards (`factory`) and the built-in default one (`isDefault`) are refused, exactly as the
+   * classic UI does not offer them. The backend itself does not validate the path (see
+   * `removePedalboard` in `docs/openapi.yml`).
+   *
+   * Removing the pedalboard that is currently running does not unload it; it keeps running with a stale path.
+   *
+   * Backend: `GET /pedalboard/remove/?bundlepath=…` (operationId `removePedalboard`).
+   * @throws {ModUiError} when the pedalboard is a factory or default one (no request is made), or when the backend
+   *   answers `false` (the bundle does not exist any more).
+   * @example
+   * const mine = (await client.pedalboards.list()).filter((pb) => !pb.factory && !pb.isDefault);
+   * await mine[0].remove();
+   */
+  async remove(): Promise<void> {
+    if (this.factory) {
+      throw new ModUiError(`"${this.title}" is a factory pedalboard and cannot be removed`);
+    }
+    if (this.isDefault) {
+      throw new ModUiError('The default pedalboard cannot be removed');
+    }
+    const ok = await this.http.getJson<boolean>('/pedalboard/remove/', { bundlepath: this.bundlepath });
+    if (ok !== true) {
+      throw new ModUiError(`The backend could not remove "${this.bundlepath}" (does the bundle still exist?)`);
+    }
   }
 }
 

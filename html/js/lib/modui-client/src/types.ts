@@ -119,6 +119,25 @@ export interface PedalboardInfo {
   version: number;
 }
 
+/** Answer of `GET /pedalboard/current` (schema in `docs/openapi.yml`, operationId `getCurrentPedalboard`). */
+export interface CurrentPedalboardState {
+  /** Absolute bundle path; empty when the running pedalboard was never saved. */
+  bundlepath: string;
+  /** Title; empty when untitled. */
+  title: string;
+  /** Changed since it was loaded or last saved. */
+  modified: boolean;
+}
+
+/** Answer of `POST /pedalboard/save` (operationId `savePedalboard`). */
+export interface SavePedalboardResponse {
+  ok: boolean;
+  /** Bundle that was written; `null` on failure. */
+  bundlepath: string | null;
+  /** Final title (made unique when a new bundle was created). */
+  title: string;
+}
+
 /** Anything {@link Device.load} accepts: a bundle path, a {@link PedalboardReference} or a {@link PedalboardInfo}. */
 export type PedalboardTarget = string | { readonly bundlepath: string };
 

@@ -131,10 +131,10 @@ describe('client.device.load()', () => {
     await expect(loading).rejects.toThrow(/WebSocket closed/);
   });
 
-  it('rejects invalid targets', () => {
+  it('rejects invalid targets', async () => {
     const { client } = makeClient(routes);
-    expect(() => client.device.load('' as string)).toThrow(ModUiError);
-    expect(() => client.device.load({} as { bundlepath: string })).toThrow(ModUiError);
+    await expect(client.device.load('' as string)).rejects.toBeInstanceOf(ModUiError);
+    await expect(client.device.load({} as { bundlepath: string })).rejects.toBeInstanceOf(ModUiError);
   });
 
   it('serializes concurrent loads', async () => {

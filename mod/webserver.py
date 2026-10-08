@@ -1550,6 +1550,15 @@ class PedalboardInfo(JsonRequestHandler):
         bundlepath = os.path.abspath(self.get_argument('bundlepath'))
         self.write(get_pedalboard_info(bundlepath))
 
+class PedalboardCurrent(JsonRequestHandler):
+    def get(self):
+        # same values that TemplateHandler.index() injects into the page as "bundlepath" and "title"
+        self.write({
+            'bundlepath': SESSION.host.pedalboard_path,
+            'title'     : SESSION.host.pedalboard_name,
+            'modified'  : bool(SESSION.host.pedalboard_modified),
+        })
+
 class PedalboardRemove(JsonRequestHandler):
     def get(self):
         bundlepath = os.path.abspath(self.get_argument('bundlepath'))
@@ -2518,6 +2527,7 @@ application = web.Application(
             (r"/pedalboard/load_remote/*(/[A-Za-z0-9_/]+[^/])/?", PedalboardLoadRemote),
             (r"/pedalboard/load_web/", PedalboardLoadWeb),
             (r"/pedalboard/factorycopy/", PedalboardFactoryCopy),
+            (r"/pedalboard/current", PedalboardCurrent),
             (r"/pedalboard/info/", PedalboardInfo),
             (r"/pedalboard/remove/", PedalboardRemove),
             (r"/pedalboard/image/(screenshot|thumbnail).png", PedalboardImage),

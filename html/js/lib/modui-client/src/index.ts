@@ -30,7 +30,8 @@
  * |--------|---------|
  * | `client.ts` | {@link ModUiClient}, {@link ModUiClientOptions} — entry point, wires everything |
  * | `pedalboards.ts` | {@link PedalboardsApi} (`client.pedalboards`), {@link PedalboardReference} |
- * | `device.ts` | {@link Device} (`client.device`) — the running pedalboard |
+ * | `device.ts` | {@link Device} (`client.device`) — load / reset the running pedalboard |
+ * | `current-pedalboard.ts` | {@link CurrentPedalboard} (`client.device.currentPedalboard`) — get / save / saveAs |
  * | `events.ts` | {@link EventChannel} (`client.events`) — the main WebSocket |
  * | `http.ts` | `HttpTransport` — internal `fetch` wrapper |
  * | `errors.ts` | {@link ModUiError}, {@link ModUiHttpError}, {@link ModUiTimeoutError} |
@@ -41,6 +42,7 @@
  */
 
 import { ModUiClient } from './client';
+import { CurrentPedalboard } from './current-pedalboard';
 import { Device } from './device';
 import { ModUiError, ModUiHttpError, ModUiTimeoutError } from './errors';
 import { EventChannel } from './events';
@@ -48,6 +50,7 @@ import { PedalboardReference, PedalboardsApi } from './pedalboards';
 
 export { ModUiClient } from './client';
 export type { ModUiClientOptions } from './client';
+export { CurrentPedalboard } from './current-pedalboard';
 export { Device } from './device';
 export { ModUiError, ModUiHttpError, ModUiTimeoutError } from './errors';
 export { EventChannel } from './events';
@@ -68,6 +71,7 @@ if (typeof window !== 'undefined') {
     PedalboardReference,
     PedalboardsApi,
     Device,
+    CurrentPedalboard,
     EventChannel,
   };
 }

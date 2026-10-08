@@ -13,7 +13,8 @@ mod-ui is the web interface of MOD audio devices.
 - **API contract**: `docs/openapi.yml` documents every HTTP endpoint, every WebSocket message
   (`/websocket`, `/rpbsocket`, `/rplsocket`), the server-rendered pages and the other channels.
 - **Typed client**: `html/js/lib/modui-client/` (sources in `src/`, tests in `test/`), a class-based TypeScript
-  client built on `fetch` and the main WebSocket. Current scope: pedalboards (list, info, load, loadDefault, reset).
+  client built on `fetch` and the main WebSocket. Current scope: pedalboards (list, info, remove, load, loadDefault, reset, currentPedalboard get/save/saveAs).
+  Cloud-related endpoints are planned under `client.cloud`.
   Developer guide with diagrams: `docs/modui-client.md`.
 - **Plans**: `docs/plans/` (see "Plans" below).
 

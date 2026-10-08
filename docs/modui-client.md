@@ -10,7 +10,7 @@ backend has *really* finished them (for example, until a pedalboard is fully loa
 - **Wire contract**: [`docs/openapi.yml`](openapi.yml)
 - **Plan / roadmap**: [`docs/plans/2026-10-modui-client.md`](plans/2026-10-modui-client.md)
 
-Current scope: **pedalboards** (list, info, load, load default, reset) plus raw WebSocket access.
+Current scope: **pedalboards** (list, info, remove, load, load default, reset, get / save / save-as of the running pedalboard) plus raw WebSocket access.
 
 ---
 
@@ -28,6 +28,16 @@ const result = await client.device.load(info);          // resolves after WebSoc
 console.log(result.name, result.snapshotId);
 
 await client.device.loadDefault();                      // the empty "Untitled" pedalboard
+
+// The running pedalboard
+const current = await client.device.currentPedalboard.get();   // PedalboardReference | null (null = untitled)
+await client.device.currentPedalboard.save();                  // overwrite it, keeping its title
+await client.device.currentPedalboard.save('New name');        // overwrite and rename
+const copy = await client.device.currentPedalboard.saveAs('Solo');  // new bundle ("Solo 2" if taken)
+
+// Library management
+const mine = (await client.pedalboards.list()).filter((pb) => !pb.factory && !pb.isDefault);
+await mine[0].remove();                                 // throws ModUiError for factory / default pedalboards
 ```
 
 Other setups:
@@ -108,6 +118,7 @@ html/js/lib/modui-client/
 │   ├── client.ts        # ModUiClient, ModUiClientOptions
 │   ├── pedalboards.ts   # PedalboardsApi, PedalboardReference
 │   ├── device.ts        # Device
+│   ├── current-pedalboard.ts  # CurrentPedalboard (client.device.currentPedalboard)
 │   ├── events.ts        # EventChannel, MessageHandler, Waiting
 │   ├── http.ts          # HttpTransport (internal)
 │   ├── errors.ts        # ModUiError, ModUiHttpError, ModUiTimeoutError
@@ -118,6 +129,7 @@ html/js/lib/modui-client/
     ├── client.test.ts
     ├── pedalboards.test.ts
     ├── device.test.ts
+    ├── current-pedalboard.test.ts
     └── events.test.ts
 ```
 
@@ -127,6 +139,7 @@ Module dependencies (arrows point to what a module imports):
 flowchart TD
   index[index.ts] --> client[client.ts]
   index --> device
+  index --> current[current-pedalboard.ts]
   index --> pedalboards
   index --> events
   index --> errors
@@ -135,6 +148,10 @@ flowchart TD
   client --> events[events.ts]
   client --> http[http.ts]
   client --> errors[errors.ts]
+  device --> current
+  current --> http
+  current --> pedalboards
+  current --> errors
   device --> events
   device --> http
   device --> pedalboards
@@ -185,14 +202,23 @@ classDiagram
     +summary: PedalboardSummary
     +isDefault: boolean
     +info() Promise~PedalboardInfo~
+    +remove() Promise~void~
   }
 
   class Device {
     -queue: Promise
     -defaultTimeoutMs: number
+    +currentPedalboard: CurrentPedalboard
     +load(target: PedalboardTarget, options?: LoadOptions) Promise~LoadResult~
     +loadDefault(options?: LoadOptions) Promise~LoadResult~
     +reset() Promise~void~
+  }
+
+  class CurrentPedalboard {
+    -enqueue: Enqueue
+    +get() Promise~PedalboardReference | null~
+    +save(newTitle?: string) Promise~PedalboardReference~
+    +saveAs(suggestedTitle: string) Promise~PedalboardReference~
   }
 
   class EventChannel {
@@ -249,6 +275,7 @@ classDiagram
   ModUiClient *-- PedalboardsApi
   ModUiClient *-- Device
   ModUiClient *-- EventChannel
+  Device *-- CurrentPedalboard
   ModUiClient ..> ModUiClientOptions : configured by
   ModUiClient ..> HttpTransport : creates
   PedalboardsApi --> HttpTransport
@@ -257,6 +284,10 @@ classDiagram
   Device --> HttpTransport
   Device --> EventChannel
   Device --> PedalboardsApi : loadDefault()
+  CurrentPedalboard --> HttpTransport
+  CurrentPedalboard --> PedalboardsApi : finds the saved bundle
+  CurrentPedalboard ..> PedalboardReference : returns
+  CurrentPedalboard ..> Device : shares its queue
   EventChannel --> WebSocketLike
   Error <|-- ModUiError
   ModUiError <|-- ModUiHttpError
@@ -331,6 +362,12 @@ classDiagram
     minimum: number
     maximum: number
   }
+  class CurrentPedalboardState {
+    <<wire: GET /pedalboard/current>>
+    bundlepath: string
+    title: string
+    modified: boolean
+  }
   class LoadResult {
     bundlepath: string
     name: string
@@ -347,6 +384,7 @@ classDiagram
   PedalboardPlugin --> MidiControl : bypassCC
   PedalboardPluginPort --> MidiControl : midiCC
   Device ..> LoadResult : load()
+  CurrentPedalboard ..> CurrentPedalboardState : reads
 ```
 
 ---
@@ -403,7 +441,55 @@ Failure paths:
 `device.loadDefault()` is the same flow, after picking the list entry whose bundle ends in
 `/default.pedalboard`, and with `isDefault=1` (the backend then clears the current title and path).
 
-### 5.2 Connecting and flow control (`events.connect`)
+### 5.2 Saving the running pedalboard (`currentPedalboard.save` / `saveAs`)
+
+`POST /pedalboard/save` always needs a `title` and an `asNew` flag (see `savePedalboard` in `docs/openapi.yml` for
+the exact rules). The client hides both: `save()` means `asNew=0` and reads the current title when you do not pass
+one; `saveAs()` means `asNew=1`. Both return the saved pedalboard as a `PedalboardReference` found in the list.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant App
+  participant CP as CurrentPedalboard
+  participant D as Device queue
+  participant S as mod-ui server
+
+  App->>CP: save(newTitle?)
+  CP->>D: enqueue (waits for a running load / reset)
+  alt newTitle omitted
+    CP->>S: GET /pedalboard/current
+    S-->>CP: { bundlepath, title, modified }
+    Note over CP: empty title → ModUiError (use saveAs or pass a title)
+  end
+  CP->>S: POST /pedalboard/save (title, asNew=0)
+  Note over S: overwrites the running bundle,<br/>factory or never-saved pedalboard → new bundle
+  S-->>CP: { ok, bundlepath, title }
+  CP->>S: GET /pedalboard/list
+  S-->>CP: PedalboardSummary[]
+  CP-->>App: PedalboardReference of the written bundle
+```
+
+What the backend does with `asNew`:
+
+```mermaid
+flowchart TD
+  A["POST /pedalboard/save<br/>title, asNew"] --> B{asNew = 1?}
+  B -- yes --> N["Always a NEW bundle<br/>title made unique ('Solo' → 'Solo 2')"]
+  B -- no --> C{Running pedalboard has a bundle<br/>under ~/.pedalboards that exists?}
+  C -- yes --> O["OVERWRITE that bundle<br/>title stored as given (rename), not made unique"]
+  C -- no --> F{Factory pedalboard?}
+  F -- yes --> K["COPY into ~/.pedalboards<br/>(same directory name), title made unique"]
+  F -- no --> N
+  N --> R[Running pedalboard now points to the written bundle]
+  O --> R
+  K --> R
+```
+
+`currentPedalboard.get()` returns `null` for an untitled pedalboard (after `reset()` or `loadDefault()`), because it
+has no bundle. It needs the backend endpoint `GET /pedalboard/current`.
+
+### 5.3 Connecting and flow control (`events.connect`)
 
 A new socket first receives a replay of the whole current state, which ends with `loading_end`. `connect()`
 resolves only after it, so that replay is never mistaken for the end of a load requested later.
@@ -434,7 +520,7 @@ sequenceDiagram
 With a **shared** socket (`options.webSocket`), `connect()` resolves as soon as the socket is open and the
 client never answers `ping` / `data_ready`, because the socket's owner (the classic UI's `host.js`) already does.
 
-### 5.3 EventChannel lifecycle
+### 5.4 EventChannel lifecycle
 
 ```mermaid
 stateDiagram-v2
@@ -461,7 +547,9 @@ stateDiagram-v2
   what makes the tests possible.
 - **Await the backend's confirmation** when it arrives over the WebSocket: register `events.waitFor()` *before*
   the HTTP call and cancel it on failure.
-- **Serialize operations that change the running pedalboard** through `Device`'s internal queue.
+- **Serialize operations that change the running pedalboard** through `Device`'s internal queue (`load`, `reset`, and everything in `currentPedalboard`).
+- **Reject, do not throw**: public methods return rejected promises for bad arguments, never synchronous exceptions.
+- **Guard destructive calls in the client** (`PedalboardReference.remove()` refuses factory and default pedalboards) because the backend does not validate paths.
 - **Remember the backend conventions** (see `docs/openapi.yml`): many handlers answer `200` with a bare
   `false` on failure; turn that into a `ModUiError`. Trailing slashes in paths matter.
 - **No runtime dependencies.** The output is one IIFE file (ES2018) loaded by a `<script>` tag.
@@ -519,3 +607,8 @@ must run the build before installing `html/` (`setup.py` and `mod-deploy.sh` pic
 - If another client or the HMI loads a pedalboard at the same moment, its `loading_end` may resolve this
   client's wait; the backend gives no way to correlate them.
 - `PedalboardInfo` has no bundle path on the wire; the client adds `bundlepath` itself.
+- The classic UI keeps its own title / bundle (learned from its own HTTP responses). Saving through the client
+  does not update them, so after `currentPedalboard.save*()` the classic UI may still show the old name until reload.
+- `currentPedalboard.get()` / `save()` rely on `GET /pedalboard/current`, added together with this API; they do not
+  work against older mod-ui servers.
+- Saving does not wait for the thumbnail: it is regenerated in the background (`/pedalboard/image/*`).

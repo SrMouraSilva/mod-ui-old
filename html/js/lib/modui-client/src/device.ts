@@ -6,6 +6,7 @@
  * @module
  */
 
+import { CurrentPedalboard } from './current-pedalboard';
 import { ModUiError } from './errors';
 import type { EventChannel } from './events';
 import type { HttpTransport } from './http';
@@ -15,7 +16,8 @@ import type { LoadOptions, LoadResult, PedalboardTarget } from './types';
 /**
  * What runs on the device right now (`client.device`).
  *
- * Operations are serialized: a second `load()` starts only after the previous one finished.
+ * Operations are serialized: a second `load()` starts only after the previous one finished, and saves made
+ * through {@link Device.currentPedalboard} wait for a running load.
  *
  * Note: when another client (or the HMI) loads a pedalboard at the same moment, its `loading_end` may
  * resolve this client's wait. mod-ui gives no way to correlate them.
@@ -23,13 +25,18 @@ import type { LoadOptions, LoadResult, PedalboardTarget } from './types';
 export class Device {
   private queue: Promise<unknown> = Promise.resolve();
 
+  /** The pedalboard that is running now: find it and save it. */
+  readonly currentPedalboard: CurrentPedalboard;
+
   /** @internal Use `client.device`. */
   constructor(
     private readonly http: HttpTransport,
     private readonly events: EventChannel,
     private readonly pedalboards: PedalboardsApi,
     private readonly defaultTimeoutMs: number,
-  ) {}
+  ) {
+    this.currentPedalboard = new CurrentPedalboard(http, pedalboards, (task) => this.enqueue(task));
+  }
 
   /**
    * Replaces the running pedalboard and resolves once the backend finished loading it.
@@ -49,7 +56,12 @@ export class Device {
    * const { name, snapshotId } = await client.device.load(first);
    */
   load(target: PedalboardTarget, options: LoadOptions = {}): Promise<LoadResult> {
-    const bundlepath = bundlepathOf(target);
+    let bundlepath: string;
+    try {
+      bundlepath = bundlepathOf(target);
+    } catch (error) {
+      return Promise.reject(error);
+    }
     return this.enqueue(() => this.loadBundle(bundlepath, false, options));
   }
 

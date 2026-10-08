@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { describe, expect, it } from 'vitest';
-import { ModUiHttpError, PedalboardReference } from '../src';
+import { ModUiError, ModUiHttpError, PedalboardReference } from '../src';
 import { infoBody, makeClient, summaries, setupFakes } from './helpers';
 
 setupFakes();
@@ -46,5 +46,49 @@ describe('PedalboardReference.info()', () => {
     expect(info.bundlepath).toBe(board.bundlepath);
     expect(info.title).toBe('My Board');
     expect(info.width).toBe(1200);
+  });
+});
+
+describe('PedalboardReference.remove()', () => {
+  const factorySummary = {
+    ...summaries[1],
+    factory: true,
+    title: 'Factory Board',
+    bundle: '/usr/share/mod/pedalboards/Factory.pedalboard',
+  };
+
+  it('calls GET /pedalboard/remove/ for a user pedalboard', async () => {
+    const { client, calls } = makeClient({
+      'GET /pedalboard/list': summaries,
+      'GET /pedalboard/remove/': true,
+    });
+    const [, board] = await client.pedalboards.list();
+    await expect(board.remove()).resolves.toBeUndefined();
+
+    expect(calls[1].method).toBe('GET');
+    expect(calls[1].url).toBe(
+      'http://modduo.local/pedalboard/remove/?bundlepath=%2Froot%2F.pedalboards%2FMy+Board%26Co.pedalboard',
+    );
+  });
+
+  it('refuses factory pedalboards without calling the backend', async () => {
+    const { client, calls } = makeClient({ 'GET /pedalboard/list': [factorySummary] });
+    const [factory] = await client.pedalboards.list();
+    await expect(factory.remove()).rejects.toThrow(/factory pedalboard/);
+    await expect(factory.remove()).rejects.toBeInstanceOf(ModUiError);
+    expect(calls).toHaveLength(1); // only the list
+  });
+
+  it('refuses the default pedalboard without calling the backend', async () => {
+    const { client, calls } = makeClient({ 'GET /pedalboard/list': summaries });
+    const [defaultBoard] = await client.pedalboards.list();
+    await expect(defaultBoard.remove()).rejects.toThrow(/default pedalboard/);
+    expect(calls).toHaveLength(1);
+  });
+
+  it('throws when the backend answers false', async () => {
+    const { client } = makeClient({ 'GET /pedalboard/list': summaries, 'GET /pedalboard/remove/': false });
+    const [, board] = await client.pedalboards.list();
+    await expect(board.remove()).rejects.toThrow(/could not remove/);
   });
 });

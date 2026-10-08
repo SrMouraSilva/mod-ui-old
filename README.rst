@@ -101,6 +101,8 @@ Usage in the page (or in the browser console), where it is available as ``window
     const info = await pedalboards[0].info();
     await client.device.load(info);      // resolves after the WebSocket "loading_end"
     await client.device.loadDefault();   // empty "Untitled" pedalboard
+    await client.device.currentPedalboard.save();             // overwrite the running pedalboard
+    await client.device.currentPedalboard.saveAs('My copy');  // save it as a new pedalboard
 
 From another origin or from Node, pass ``new ModUiClient({ baseUrl: 'http://modduo.local' })``.
 The developer guide, with architecture, class and sequence diagrams, is ``docs/modui-client.md``.

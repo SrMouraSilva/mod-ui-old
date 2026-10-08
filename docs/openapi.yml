@@ -1485,11 +1485,28 @@ paths:
     post:
       tags: [Pedalboards]
       operationId: savePedalboard
-      summary: Save the running pedalboard
+      summary: Save the running pedalboard (overwrite it or save a copy)
       description: |
-        Saves the current graph, snapshots and addressings. A thumbnail is scheduled when the graph changed. The pedalboard
-        cache is refreshed (a new title also resets the pedalboard list cache). When the device has an HMI that
-        shows pedalboard names, it is updated too.
+        Writes the running graph, snapshots and addressings to a `.pedalboard` bundle below the user pedalboards
+        directory (`~/.pedalboards`). **`asNew` chooses *where* it is written**:
+
+        | `asNew` | Situation of the running pedalboard | Bundle written | Title |
+        |---------|-------------------------------------|----------------|-------|
+        | `0` — *Save* | Loaded from a user bundle (`~/.pedalboards/...`) that still exists | **The same bundle**, overwritten | `title` is stored as is (this also renames the pedalboard). It is **not** made unique. |
+        | `0` — *Save* | A **factory** pedalboard (read-only, shipped with the device) | A **copy** in `~/.pedalboards`, with the same directory name as the factory one | Made unique among the user's pedalboards |
+        | `0` — *Save* | Untitled / empty (no bundle yet), or the bundle is not under `~/.pedalboards` | A **new** bundle (same as `asNew=1`) | Made unique |
+        | `1` — *Save as* | Any | Always a **new** bundle named after the title (`<title simplified, max 16 chars>.pedalboard`; a random `-<number>` is appended if that directory exists) | Made unique: `"My Board"` becomes `"My Board 2"` if taken |
+
+        After saving, the running pedalboard **points to the written bundle**, so later `asNew=0` saves overwrite it.
+        The title in the response is the final one; it can differ from the request only when a new bundle is created.
+
+        Side effects: a thumbnail is regenerated if the graph changed since the last save (see
+        `generatePedalboardImage`); creating a new bundle resets the pedalboard list cache (listing again shows it),
+        overwriting only increments the pedalboard's `version`; and if the device has an HMI that shows
+        pedalboard names, it is updated. The classic UI sends `asNew=0` for *Save* and `asNew=1` for *Save as*.
+
+        `title` is always required, even for an overwrite: read the current one with `getCurrentPedalboard`
+        if you want to keep it.
       requestBody:
         required: true
         content:
@@ -1498,8 +1515,15 @@ paths:
               type: object
               required: [title, asNew]
               properties:
-                title: { type: string }
-                asNew: { $ref: '#/components/schemas/IntBoolean' }
+                title:
+                  type: string
+                  description: Pedalboard title. With `asNew=0` on a user bundle it renames the pedalboard.
+                asNew:
+                  allOf:
+                    - $ref: '#/components/schemas/IntBoolean'
+                  description: >-
+                    `0` overwrite the running pedalboard's own bundle (falls back to a new bundle when it has
+                    none or is a factory one); `1` always write a new bundle.
       responses:
         "200":
           description: Result.
@@ -1512,12 +1536,42 @@ paths:
                   ok: { type: boolean }
                   bundlepath:
                     type: [string, "null"]
-                    description: Bundle directory (`null` on failure).
+                    description: >-
+                      Bundle that was written (`null` on failure). It differs from the previous bundle when a new
+                      one was created.
                   title:
                     type: string
-                    description: Final title (made unique when it clashes with another user pedalboard).
+                    description: Final title (made unique when a new bundle was created).
         "400":
           $ref: '#/components/responses/BadRequest'
+  /pedalboard/current:
+    get:
+      tags: [Pedalboards]
+      operationId: getCurrentPedalboard
+      summary: Bundle path and title of the running pedalboard
+      description: |
+        The same values the server injects into the index page as `bundlepath` and `title`, available without
+        parsing HTML. Both are empty strings for an untitled pedalboard (after `GET /reset`, or after loading the default
+        pedalboard with `isDefault=1`). Use the returned `bundlepath` with `GET /pedalboard/list` to get the full
+        entry, and the `title` as the `title` of `POST /pedalboard/save` to keep the current name.
+      responses:
+        "200":
+          description: Current pedalboard.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [bundlepath, title, modified]
+                properties:
+                  bundlepath:
+                    type: string
+                    description: Absolute bundle path, empty when the pedalboard has never been saved.
+                  title:
+                    type: string
+                    description: Title, empty when untitled.
+                  modified:
+                    type: boolean
+                    description: The pedalboard changed since it was loaded or last saved.
   /pedalboard/load_bundle/:
     post:
       tags: [Pedalboards]
@@ -1653,7 +1707,14 @@ paths:
       tags: [Pedalboards]
       operationId: removePedalboard
       summary: Delete a user pedalboard
-      description: Deletes the bundle and removes it from all banks. `false` when it does not exist.
+      description: |
+        Deletes the bundle directory and removes the pedalboard from all banks. `false` when the path does not exist.
+
+        **The server does not validate the path.** It does not check that it is a pedalboard, that it is inside the
+        user pedalboards directory, nor that it is not the *running* pedalboard (which keeps running with a stale
+        path). Factory pedalboards are in `/usr/share/mod/pedalboards`, which is a read-only filesystem on a device (the
+        delete then fails with an error response instead of `false`) but is **deleted** on a development machine. The classic UI never offers removal for factory pedalboards or for
+        `default.pedalboard`; callers should do the same checks.
       parameters:
         - $ref: '#/components/parameters/BundlePath'
       responses:
@@ -1666,6 +1727,15 @@ paths:
       tags: [Pedalboards]
       operationId: getPedalboardImage
       summary: Pedalboard screenshot or thumbnail
+      description: |
+        Serves the file `<bundlepath>/<kind>.png` of **any** pedalboard bundle: it is **not** limited to the running
+        pedalboard (nor to the library). `bundlepath` is used as the root directory of the file handler without any
+        validation, so any directory that contains `screenshot.png` / `thumbnail.png` can be served.
+
+        The images are produced by an external process (`modtools.pedalboard take_screenshot`) **from the saved
+        bundle**, never from the running state. They are (re)generated when a pedalboard is saved after its graph
+        changed, or on demand with `generatePedalboardImage`. A bundle that has no image yet answers `404`
+        (see `checkPedalboardImage`), and unsaved edits of the running pedalboard are not reflected.
       parameters:
         - name: kind
           in: path
@@ -1698,7 +1768,11 @@ paths:
       tags: [Pedalboards]
       operationId: generatePedalboardImage
       summary: Queue thumbnail generation and wait for it
-      description: Responds when the image is ready.
+      description: |
+        Queues the generation of `screenshot.png` and `thumbnail.png` for **any** pedalboard bundle (not only the
+        running one) and answers when the job finished. Jobs run one at a time in a background process
+        and render the pedalboard **from the bundle on disk**, so the running pedalboard must be saved first for
+        its edits to appear. Existing images of that bundle are deleted when the job starts.
       parameters:
         - $ref: '#/components/parameters/BundlePath'
       responses:
@@ -1711,7 +1785,9 @@ paths:
       tags: [Pedalboards]
       operationId: checkPedalboardImage
       summary: Check thumbnail state
-      description: Cached for a year (the client adds `v`).
+      description: >-
+        Works for any bundle path (not only the running pedalboard): looks at the generation queue and at
+        `<bundlepath>/thumbnail.png`. Cached for a year (the client adds `v`).
       parameters:
         - $ref: '#/components/parameters/BundlePath'
         - name: v
@@ -1745,7 +1821,9 @@ paths:
       tags: [Pedalboards]
       operationId: waitPedalboardImage
       summary: Wait for pending thumbnail jobs
-      description: 'Long request: answers once queued jobs for this bundle are finished.'
+      description: >-
+        Long request for any bundle path: answers once the queued or running job for this bundle is finished.
+        When nothing is pending it answers immediately, with `ok: false` if the bundle has no thumbnail.
       parameters:
         - $ref: '#/components/parameters/BundlePath'
       responses:
