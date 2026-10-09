@@ -172,8 +172,8 @@ export function setupFakes(): void {
 export const gainUri = 'http://moddevices.com/plugins/mod-devel/Gain';
 export const midiUri = 'http://moddevices.com/plugins/mod-devel/MidiThru';
 
-function port(symbol: string, name: string, index: number) {
-  return { valid: true, index, symbol, name, shortName: name };
+function port(symbol: string, name: string, index: number, extra: Record<string, unknown> = {}) {
+  return { valid: true, index, symbol, name, shortName: name, ...extra };
 }
 
 export const gainInfo = {
@@ -197,7 +197,17 @@ export const gainInfo = {
   stability: 'stable',
   ports: {
     audio: { input: [port('in', 'In', 0)], output: [port('out', 'Out', 0)] },
-    control: { input: [port('gain', 'Gain', 1)], output: [] },
+    control: {
+      input: [
+        port('gain', 'Gain', 1, { ranges: { minimum: -90, maximum: 24, default: 0 }, properties: [] }),
+        port('enabled', 'Enabled', 2, {
+          ranges: { minimum: 0, maximum: 1, default: 1 },
+          designation: 'http://lv2plug.in/ns/lv2core#enabled',
+          properties: ['toggled'],
+        }),
+      ],
+      output: [],
+    },
   },
 };
 

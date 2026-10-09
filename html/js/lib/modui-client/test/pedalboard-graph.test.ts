@@ -70,7 +70,8 @@ describe('currentPedalboard.plugins.list()', () => {
 
     expect(instances).toHaveLength(1);
     expect(instances[0]).toBeInstanceOf(PluginInstance);
-    expect(instances[0]).toMatchObject({ instance: '/graph/Gain', uri: gainUri, x: 10, y: 20, bypassed: false });
+    expect(instances[0]).toMatchObject({ instance: '/graph/Gain', uri: gainUri, x: 10, y: 20 });
+    expect(await instances[0].isActive()).toBe(true);
     expect(idsOf(instances[0].ports.audio.input)).toEqual(['/graph/Gain/in']);
     expect(idsOf(instances[0].ports.audio.output)).toEqual(['/graph/Gain/out']);
     expect(instances[0].ports.midi).toEqual({ input: [], output: [] });
@@ -84,7 +85,7 @@ describe('currentPedalboard.plugins.list()', () => {
     expect(calls).toHaveLength(1); // the description is cached
   });
 
-  it('follows live frames: add, plugin_pos, bypass and remove', async () => {
+  it('follows live frames: add, plugin_pos, bypass and remove (also on instances listed before)', async () => {
     const { current, socket } = await wiredDevice();
     socket.emit(`add /graph/Midi ${midiUri} 5.0 6.0 0 1.0.0.0 0`);
     socket.emit('plugin_pos /graph/Gain 100 200');
@@ -92,7 +93,10 @@ describe('currentPedalboard.plugins.list()', () => {
 
     const instances = await current.plugins.list();
     expect(instances.map((i) => i.instance)).toEqual(['/graph/Gain', '/graph/Midi']);
-    expect(instances[0]).toMatchObject({ x: 100, y: 200, bypassed: true });
+    expect(instances[0]).toMatchObject({ x: 100, y: 200 });
+    expect(await instances[0].isActive()).toBe(false);
+    socket.emit('plugin_pos /graph/Gain 7 8'); // the object is live: no need to list again
+    expect(instances[0]).toMatchObject({ x: 7, y: 8 });
 
     socket.emit('remove /graph/Gain');
     expect((await current.plugins.list()).map((i) => i.instance)).toEqual(['/graph/Midi']);
@@ -474,5 +478,180 @@ describe('queue', () => {
     await loading;
     await listing;
     expect(order).toEqual(['reset', 'load', 'list']);
+  });
+});
+
+describe('instance.params', () => {
+  const sentTo = (socket: FakeWebSocket) => socket.sent.filter((frame) => /^(param_set|plugin_pos)/.test(frame));
+
+  it('lists the control inputs with their description, and finds them by symbol', async () => {
+    const { current } = await wiredDevice();
+    const [instance] = await current.plugins.list();
+
+    const params = instance.params.list();
+    expect(params.map((param) => param.symbol)).toEqual(['gain', 'enabled']);
+    expect(instance.params.get('gain')).toMatchObject({
+      symbol: 'gain', name: 'Gain', default: 0, minimum: -90, maximum: 24, designation: '', properties: [], owner: instance,
+    });
+    expect(instance.params.get('nope')).toBeUndefined();
+    expect(instance.params.list()).not.toBe(params); // a copy
+  });
+
+  it('has no params when the plugin is not installed', async () => {
+    const { current } = await wiredDevice({ 'POST /effect/bulk/': {} });
+    const [instance] = await current.plugins.list();
+    expect(instance.params.list()).toEqual([]);
+  });
+
+  it('value is the default until a value is known, then follows param_set frames (also from others)', async () => {
+    const { current, socket } = await wiredDevice();
+    socket.emit('param_set /graph/Gain gain 6.500000');
+    const [instance] = await current.plugins.list();
+    const gain = instance.params.get('gain')!;
+    expect(gain.value).toBe(6.5);
+    expect(instance.params.get('enabled')!.value).toBe(1); // default
+
+    socket.emit('param_set /graph/Gain gain -3.000000');
+    expect(gain.value).toBe(-3);
+  });
+
+  it('setValue() sends param_set and shows the new value at once, without waiting for an answer', async () => {
+    const { current, socket } = await wiredDevice();
+    const [instance] = await current.plugins.list();
+    const gain = instance.params.get('gain')!;
+
+    await gain.setValue(3.5);
+
+    expect(sentTo(socket)).toEqual(['param_set /graph/Gain/gain 3.5']);
+    expect(gain.value).toBe(3.5);
+  });
+
+  it.each([
+    ['NaN', NaN, /finite number/],
+    ['Infinity', Infinity, /finite number/],
+    ['a string', '3' as unknown as number, /finite number/],
+    ['above the maximum', 25, /outside the range/],
+    ['below the minimum', -91, /outside the range/],
+  ])('setValue() rejects %s without sending anything', async (_name, value, message) => {
+    const { current, socket } = await wiredDevice();
+    const [instance] = await current.plugins.list();
+    await expect(instance.params.get('gain')!.setValue(value)).rejects.toThrow(message);
+    expect(sentTo(socket)).toEqual([]);
+  });
+
+  it('accepts the limits of the range', async () => {
+    const { current, socket } = await wiredDevice();
+    const [instance] = await current.plugins.list();
+    await instance.params.get('gain')!.setValue(-90);
+    await instance.params.get('gain')!.setValue(24);
+    expect(sentTo(socket)).toEqual(['param_set /graph/Gain/gain -90', 'param_set /graph/Gain/gain 24']);
+  });
+
+  it('setValue() refuses a port the host drives (designation) and a plugin that is gone', async () => {
+    const { current, socket } = await wiredDevice();
+    const [instance] = await current.plugins.list();
+    await expect(instance.params.get('enabled')!.setValue(0)).rejects.toThrow(/driven by the host/);
+
+    socket.emit('remove /graph/Gain');
+    await expect(instance.params.get('gain')!.setValue(1)).rejects.toThrow(/no plugin "\/graph\/Gain"/);
+    expect(sentTo(socket)).toEqual([]);
+  });
+});
+
+describe('instance bypass: isActive(), setActive(), toggle()', () => {
+  const bypassFrames = (socket: FakeWebSocket) => socket.sent.filter((frame) => frame.includes(':bypass'));
+
+  it('isActive() reads the live state', async () => {
+    const { current, socket } = await wiredDevice();
+    const [instance] = await current.plugins.list();
+    expect(await instance.isActive()).toBe(true);
+    socket.emit('param_set /graph/Gain :bypass 1.000000');
+    expect(await instance.isActive()).toBe(false);
+    socket.emit('param_set /graph/Gain :bypass 0.000000');
+    expect(await instance.isActive()).toBe(true);
+  });
+
+  it('setActive(false) bypasses and setActive(true) turns it on, with the state updated at once', async () => {
+    const { current, socket } = await wiredDevice();
+    const [instance] = await current.plugins.list();
+
+    await instance.setActive(false);
+    expect(await instance.isActive()).toBe(false);
+    await instance.setActive(true);
+    expect(await instance.isActive()).toBe(true);
+
+    expect(bypassFrames(socket)).toEqual(['param_set /graph/Gain/:bypass 1.0', 'param_set /graph/Gain/:bypass 0.0']);
+  });
+
+  it('toggle() flips the state and resolves with the new one', async () => {
+    const { current, socket } = await wiredDevice();
+    const [instance] = await current.plugins.list();
+
+    await expect(instance.toggle()).resolves.toBe(false);
+    await expect(instance.toggle()).resolves.toBe(true);
+    expect(bypassFrames(socket)).toEqual(['param_set /graph/Gain/:bypass 1.0', 'param_set /graph/Gain/:bypass 0.0']);
+  });
+
+  it('rejects a non-boolean and a plugin that is gone, without sending anything', async () => {
+    const { current, socket } = await wiredDevice();
+    const [instance] = await current.plugins.list();
+    await expect(instance.setActive('yes' as unknown as boolean)).rejects.toBeInstanceOf(ModUiError);
+
+    socket.emit('remove /graph/Gain');
+    await expect(instance.isActive()).rejects.toThrow(/no plugin/);
+    await expect(instance.setActive(false)).rejects.toThrow(/no plugin/);
+    await expect(instance.toggle()).rejects.toThrow(/no plugin/);
+    expect(bypassFrames(socket)).toEqual([]);
+  });
+});
+
+describe('instance.move()', () => {
+  it('sends plugin_pos and x / y show the new position at once', async () => {
+    const { current, socket } = await wiredDevice();
+    const [instance] = await current.plugins.list();
+
+    await instance.move({ x: 320, y: 140.5 });
+
+    expect(socket.sent.filter((f) => f.startsWith('plugin_pos'))).toEqual(['plugin_pos /graph/Gain 320 140.5']);
+    expect(instance).toMatchObject({ x: 320, y: 140.5 });
+  });
+
+  it.each([[{ x: NaN, y: 1 }], [{ x: 1, y: Infinity }], [{ x: '1', y: 2 }], [null]])(
+    'rejects the position %j without sending anything',
+    async (position) => {
+      const { current, socket } = await wiredDevice();
+      const [instance] = await current.plugins.list();
+      await expect(instance.move(position as never)).rejects.toThrow(/finite numbers/);
+      expect(socket.sent.filter((f) => f.startsWith('plugin_pos'))).toEqual([]);
+    },
+  );
+
+  it('rejects a plugin that is gone, without sending anything', async () => {
+    const { current, socket } = await wiredDevice();
+    const [instance] = await current.plugins.list();
+    socket.emit('remove /graph/Gain');
+    await expect(instance.move({ x: 1, y: 2 })).rejects.toThrow(/no plugin/);
+    expect(socket.sent.filter((f) => f.startsWith('plugin_pos'))).toEqual([]);
+  });
+
+  it('runs after a pending load (device queue)', async () => {
+    const order: string[] = [];
+    const { client, current, socket } = await wiredDevice({
+      'GET /pedalboard/list': [{ broken: false, factory: false, hasTrialPlugins: false, uri: 'file:///d.ttl', bundle: '/root/.pedalboards/default.pedalboard', title: 'Default', version: 0 }],
+      'GET /reset': () => { order.push('reset'); return true; },
+      'POST /pedalboard/load_bundle/': () => {
+        order.push('load');
+        socket.emit('loading_end 0');
+        return { ok: true, name: '' };
+      },
+    });
+    const [instance] = await current.plugins.list();
+    socket.emit('add /graph/Other ' + gainUri + ' 0.0 0.0 0 1.0.0.0 0'); // so the plugin below still exists after the reset
+    const loading = client.device.loadDefault();
+    const moving = instance.move({ x: 1, y: 2 }).then(() => order.push('move'), (e) => order.push('move rejected: ' + e.message));
+    await loading;
+    await moving;
+    expect(order.slice(0, 2)).toEqual(['reset', 'load']);
+    expect(order[2]).toMatch(/^move/);
   });
 });

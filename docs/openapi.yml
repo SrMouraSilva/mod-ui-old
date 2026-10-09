@@ -480,10 +480,10 @@ paths:
         |---------|-----------|--------|
         | `pong` | – | Answer to `ping`. Ignored. |
         | `data_ready` | `<counter:int>` | Acknowledge flow control, see above. |
-        | `param_set` | `<instance>/<symbol> <value:float>` | Set a control port (symbol `:bypass`: `value >= 0.5` bypasses). Echoed as `param_set <instance> <symbol> <value>` to **other** sockets. Marks the pedalboard as modified. |
+        | `param_set` | `<instance>/<symbol> <value:float>` | Set a control port (symbol `:bypass`: `value >= 0.5` bypasses). Echoed as `param_set <instance> <symbol> <value>` to **other** sockets only: the sender gets no confirmation. Marks the pedalboard as modified. Ports with a host designation (enabled, free-wheeling, beats per bar/minute, speed) are refused by the host, yet still echoed. An instance that does not exist raises an error and closes the socket. |
         | `patch_get` | `<instance> <uri>` | Ask the plugin for the current value of a patch parameter; the answer arrives as `patch_set`. |
         | `patch_set` | `<instance> <uri> <type:char> <value...>` | Set a patch parameter (types as in the server message). Echoed to other sockets as `patch_set <instance> <writable> <uri> <type> <value>`. |
-        | `plugin_pos` | `<instance> <x:float> <y:float>` | Persist a plugin block position. Echoed to other sockets as `plugin_pos <instance> <x:int> <y:int>`. |
+        | `plugin_pos` | `<instance> <x:float> <y:float>` | Persist a plugin block position. Echoed to other sockets as `plugin_pos <instance> <x:int> <y:int>`; the sender gets no confirmation. An instance that does not exist raises an error and closes the socket. |
         | `pb_size` | `<width:float> <height:float>` | Canvas size of the pedalboard at 1:1 zoom (stored with the pedalboard). |
         | `transport-rolling` | `<0\|1>` | Start/stop the transport. |
         | `transport-bpm` | `<bpm:float>` | Set tempo. |

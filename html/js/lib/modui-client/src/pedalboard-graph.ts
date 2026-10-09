@@ -12,7 +12,7 @@ import type { EventChannel } from './events';
 import type { HttpTransport } from './http';
 import type { GraphModel, GraphState, ModelPlugin } from './graph-state';
 import type { PluginsApi } from './plugins';
-import type { PluginInfo, PluginTarget, PortDirection, PortType, Position } from './types';
+import type { PluginInfo, PluginPortInfo, PluginTarget, PortDirection, PortType, Position } from './types';
 
 /** Runs a task after the pending device operations (see `Device`), so it never overlaps a load or a save. */
 export type Enqueue = <T>(task: () => Promise<T>) => Promise<T>;
@@ -40,36 +40,154 @@ export class Port {
   ) {}
 }
 
+/** What a {@link PluginInstance} asks the engine to do (internal). */
+export interface InstanceOps {
+  /** The current model entry of a plugin, or `undefined` when it is not in the pedalboard (any more). */
+  live(instance: string): ModelPlugin | undefined;
+  remove(instance: string): Promise<void>;
+  setParam(instance: string, symbol: string, value: number): Promise<void>;
+  isActive(instance: string): Promise<boolean>;
+  setActive(instance: string, active: boolean): Promise<void>;
+  toggle(instance: string): Promise<boolean>;
+  move(instance: string, position: Position): Promise<void>;
+}
+
+/** Control ports the host drives itself: `param_set` on them is refused. */
+const HOST_DESIGNATIONS = [
+  'http://lv2plug.in/ns/lv2core#enabled',
+  'http://lv2plug.in/ns/lv2core#freeWheeling',
+  'http://lv2plug.in/ns/ext/time#beatsPerBar',
+  'http://lv2plug.in/ns/ext/time#beatsPerMinute',
+  'http://lv2plug.in/ns/ext/time#speed',
+];
+
 /**
- * A plugin in the running pedalboard. It is a snapshot taken when it was listed or created: `x`, `y` and
- * `bypassed` do not follow later changes.
+ * A control input of a plugin instance: a knob, a switch, a selector. Get them with `instance.params.list()` or
+ * `instance.params.get('gain')`.
+ *
+ * The description (`symbol`, `name`, `default`, `minimum`, `maximum`, ...) never changes. {@link Param.value} is read from
+ * the live state each time, so it follows changes made by this client, by the classic UI and by other clients.
+ */
+export class Param {
+  readonly symbol: string;
+  readonly name: string;
+  readonly default: number;
+  /** `-Infinity` when the plugin does not say. */
+  readonly minimum: number;
+  /** `Infinity` when the plugin does not say. */
+  readonly maximum: number;
+  /** LV2 designation URI, empty when none. Ports with a designation the host drives (enabled, transport, ...) cannot be set. */
+  readonly designation: string;
+  /** LV2 port properties such as `toggled`, `integer`, `enumeration`, `logarithmic`, `trigger`, `notOnGUI`. */
+  readonly properties: string[];
+
+  /** @internal Built by the client. */
+  constructor(readonly owner: PluginInstance, port: PluginPortInfo, private readonly ops: InstanceOps) {
+    this.symbol = port.symbol;
+    this.name = port.name;
+    this.default = port.ranges?.default ?? 0;
+    this.minimum = port.ranges?.minimum ?? -Infinity;
+    this.maximum = port.ranges?.maximum ?? Infinity;
+    this.designation = port.designation ?? '';
+    this.properties = port.properties ?? [];
+  }
+
+  /**
+   * The current value: the last one the backend announced (`param_set`) or this client sent, `default` when none is known
+   * yet. Synchronous: it reads memory, it makes no request.
+   */
+  get value(): number {
+    return this.owner.liveModel().values.get(this.symbol) ?? this.default;
+  }
+
+  /**
+   * Changes the value in the audio engine.
+   *
+   * The backend does not confirm a `param_set` to the socket that sent it (only to the other sockets), so there is nothing
+   * to wait for: the promise resolves once the message was sent, and {@link Param.value} already shows the new value.
+   * The call is queued behind loads, resets and saves.
+   *
+   * Checked before anything is sent (the backend would close the socket on some bad messages): the value is a finite
+   * number between `minimum` and `maximum`, the port is not driven by the host, and the plugin is still in the pedalboard.
+   *
+   * WebSocket: `param_set <instance>/<symbol> <value>` (see `connectMainWebSocket`).
+   * @throws {ModUiError} for an invalid value, a host-driven port, or a plugin that is not in the pedalboard.
+   * @example
+   * const gain = instance.params.get('gain')!;
+   * await gain.setValue(gain.default);
+   * await gain.setValue(gain.maximum / 2);
+   */
+  setValue(value: number): Promise<void> {
+    if (typeof value !== 'number' || !isFinite(value)) {
+      return Promise.reject(new ModUiError(`"${this.symbol}": expected a finite number, got ${String(value)}`));
+    }
+    if (value < this.minimum || value > this.maximum) {
+      return Promise.reject(
+        new ModUiError(`"${this.symbol}": ${value} is outside the range ${this.minimum} .. ${this.maximum}`),
+      );
+    }
+    if (HOST_DESIGNATIONS.includes(this.designation)) {
+      return Promise.reject(new ModUiError(`"${this.symbol}" is driven by the host (${this.designation}) and cannot be set`));
+    }
+    return this.ops.setParam(this.owner.instance, this.symbol, value);
+  }
+}
+
+/** The control inputs of a plugin instance (`instance.params`). */
+export class PluginParams {
+  /** @internal Built by the client. */
+  constructor(private readonly items: Param[]) {}
+
+  /**
+   * Every control input, in the order of the plugin. Synchronous: the description is already known when the instance
+   * exists. Empty when the plugin is not installed.
+   * @example
+   * for (const param of instance.params.list()) console.log(param.symbol, param.value, param.minimum, param.maximum);
+   */
+  list(): Param[] {
+    return [...this.items];
+  }
+
+  /**
+   * Finds a control input by symbol.
+   * @example
+   * await instance.params.get('gain')?.setValue(3.5);
+   */
+  get(symbol: string): Param | undefined {
+    return this.items.find((param) => param.symbol === symbol);
+  }
+}
+
+/**
+ * A plugin in the running pedalboard.
+ *
+ * `x`, `y`, {@link Param.value} and the active state are read from the live state, so they follow changes made through this
+ * client, the classic UI or other clients. The object keeps its identity and its ports; list again to learn about plugins
+ * that were added or removed.
  */
 export class PluginInstance {
   /** Instance path, e.g. `/graph/Gain`. */
   readonly instance: string;
   /** LV2 URI of the plugin. */
   readonly uri: string;
-  readonly x: number;
-  readonly y: number;
-  readonly bypassed: boolean;
   /**
    * Connectable ports by type and direction: `ports.audio.input`, `ports.audio.output`, `ports.midi.input`, ...
    * Control ports are not connectable and are not listed.
    */
   readonly ports: PortGroups = emptyPortGroups();
+  /** The control inputs (knobs, switches, ...): `params.list()`, `params.get('gain')`. */
+  readonly params: PluginParams;
 
   /** @internal Built by the client. */
   constructor(
-    model: ModelPlugin,
+    private readonly last: ModelPlugin,
     /** Description of the plugin; `null` when the plugin is not installed. */
     readonly info: PluginInfo | null,
-    private readonly removeInstance: (instance: string) => Promise<void>,
+    private readonly ops: InstanceOps,
   ) {
-    this.instance = model.instance;
-    this.uri = model.uri;
-    this.x = model.x;
-    this.y = model.y;
-    this.bypassed = model.bypassed;
+    this.instance = last.instance;
+    this.uri = last.uri;
+    const params: Param[] = [];
     if (info) {
       for (const type of PORT_TYPES) {
         for (const direction of ['input', 'output'] as const) {
@@ -80,7 +198,26 @@ export class PluginInstance {
           }
         }
       }
+      for (const port of info.ports.control?.input ?? []) {
+        params.push(new Param(this, port, ops));
+      }
     }
+    this.params = new PluginParams(params);
+  }
+
+  /** @internal The live state of this plugin (the last known one when it was removed). */
+  liveModel(): ModelPlugin {
+    return this.ops.live(this.instance) ?? this.last;
+  }
+
+  /** Horizontal position of the block in the canvas. */
+  get x(): number {
+    return this.liveModel().x;
+  }
+
+  /** Vertical position of the block in the canvas. */
+  get y(): number {
+    return this.liveModel().y;
   }
 
   /**
@@ -93,11 +230,63 @@ export class PluginInstance {
   }
 
   /**
+   * Whether the plugin is processing audio (`true`) or bypassed (`false`). Reads the live state, after the socket is in sync.
+   * @throws {ModUiError} when the plugin is not in the pedalboard (any more).
+   * @example
+   * if (await instance.isActive()) console.log('on');
+   */
+  isActive(): Promise<boolean> {
+    return this.ops.isActive(this.instance);
+  }
+
+  /**
+   * Turns the plugin on (`true`) or bypasses it (`false`). Like {@link Param.setValue}, the backend sends no confirmation to
+   * the sender: the promise resolves once the message was sent.
+   *
+   * WebSocket: `param_set <instance>/:bypass <0|1>` (`1` bypasses).
+   * @throws {ModUiError} when the plugin is not in the pedalboard.
+   * @example
+   * await instance.setActive(false);   // bypass
+   */
+  setActive(active: boolean): Promise<void> {
+    if (typeof active !== 'boolean') {
+      return Promise.reject(new ModUiError('Expected true (on) or false (bypassed)'));
+    }
+    return this.ops.setActive(this.instance, active);
+  }
+
+  /**
+   * Switches between on and bypassed and resolves with the new state (`true` = active).
+   * @throws {ModUiError} when the plugin is not in the pedalboard.
+   * @example
+   * const active = await instance.toggle();
+   */
+  toggle(): Promise<boolean> {
+    return this.ops.toggle(this.instance);
+  }
+
+  /**
+   * Moves the block in the canvas and resolves once the message was sent (no confirmation is sent to the sender). The
+   * position is stored with the pedalboard at the next save, and `x` / `y` already show it.
+   *
+   * WebSocket: `plugin_pos <instance> <x> <y>`.
+   * @throws {ModUiError} for coordinates that are not finite numbers, or a plugin that is not in the pedalboard.
+   * @example
+   * await instance.move({ x: 320, y: 140 });
+   */
+  move(position: Position): Promise<void> {
+    if (!position || !isFinite(position.x) || !isFinite(position.y) || typeof position.x !== 'number' || typeof position.y !== 'number') {
+      return Promise.reject(new ModUiError('Expected a position { x, y } with finite numbers'));
+    }
+    return this.ops.move(this.instance, position);
+  }
+
+  /**
    * Removes this plugin (and its connections) from the pedalboard. Same as `plugins.remove(instance)`.
    * @throws {ModUiError} see {@link PedalboardPlugins.remove}.
    */
   remove(): Promise<void> {
-    return this.removeInstance(this.instance);
+    return this.ops.remove(this.instance);
   }
 }
 
@@ -304,6 +493,48 @@ export class PedalboardGraph {
     });
   }
 
+  // The backend sends no confirmation to the socket that sent "param_set" or "plugin_pos" (only to the others), so these
+  // calls resolve once the message is sent, and update the model themselves.
+
+  setParam(instance: string, symbol: string, value: number): Promise<void> {
+    return this.enqueue(async () => {
+      const plugin = await this.requirePlugin(instance);
+      this.events.send(`param_set ${instance}/${symbol} ${value}`);
+      plugin.values.set(symbol, value);
+    });
+  }
+
+  isActive(instance: string): Promise<boolean> {
+    return this.enqueue(async () => !(await this.requirePlugin(instance)).bypassed);
+  }
+
+  setActive(instance: string, active: boolean): Promise<void> {
+    return this.enqueue(async () => {
+      const plugin = await this.requirePlugin(instance);
+      this.events.send(`param_set ${instance}/:bypass ${active ? '0.0' : '1.0'}`);
+      plugin.bypassed = !active;
+    });
+  }
+
+  toggle(instance: string): Promise<boolean> {
+    return this.enqueue(async () => {
+      const plugin = await this.requirePlugin(instance);
+      const active = plugin.bypassed; // bypassed now -> active after
+      this.events.send(`param_set ${instance}/:bypass ${active ? '0.0' : '1.0'}`);
+      plugin.bypassed = !active;
+      return active;
+    });
+  }
+
+  move(instance: string, position: Position): Promise<void> {
+    return this.enqueue(async () => {
+      const plugin = await this.requirePlugin(instance);
+      this.events.send(`plugin_pos ${instance} ${position.x} ${position.y}`);
+      plugin.x = position.x;
+      plugin.y = position.y;
+    });
+  }
+
   connect(from: Port | string, to: Port | string): Promise<PedalboardConnection> {
     return this.enqueue(async () => {
       const view = await this.view();
@@ -360,8 +591,27 @@ export class PedalboardGraph {
 
   // ---- model → objects ----------------------------------------------------------------------------------------------
 
+  private readonly ops: InstanceOps = {
+    live: (instance) => this.state.peek().plugins.get(instance),
+    remove: (instance) => this.removePlugin(instance),
+    setParam: (instance, symbol, value) => this.setParam(instance, symbol, value),
+    isActive: (instance) => this.isActive(instance),
+    setActive: (instance, active) => this.setActive(instance, active),
+    toggle: (instance) => this.toggle(instance),
+    move: (instance, position) => this.move(instance, position),
+  };
+
   private instanceOf(model: ModelPlugin, info: PluginInfo | null): PluginInstance {
-    return new PluginInstance(model, info, (instance) => this.removePlugin(instance));
+    return new PluginInstance(model, info, this.ops);
+  }
+
+  /** The model entry of a plugin. The backend raises (and closes the socket) for an unknown instance, so check first. */
+  private async requirePlugin(instance: string): Promise<ModelPlugin> {
+    const plugin = (await this.state.ready()).plugins.get(instance);
+    if (!plugin) {
+      throw new ModUiError(`There is no plugin "${instance}" in the running pedalboard`);
+    }
+    return plugin;
   }
 
   /** Builds the objects for the current model. Must run inside the queue. */

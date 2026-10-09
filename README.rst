@@ -111,6 +111,9 @@ Usage in the page (or in the browser console), where it is available as ``window
     const [capture] = await ports.audio.output();    // ports of the pedalboard itself: audio/midi/cv x input()/output(), or ports.list()
     const connection = await connections.connect(capture, instance.ports.audio.input[0]);   // output -> input, same type
     await connections.disconnect(connection);
+    await instance.params.get('gain').setValue(3.5);   // control values: a live `value`, range checked
+    await instance.setActive(false);                   // bypass (also isActive(), toggle())
+    await instance.move({ x: 320, y: 140 });
     await plugins.remove(instance);
 
 From another origin or from Node, pass ``new ModUiClient({ baseUrl: 'http://modduo.local' })``.

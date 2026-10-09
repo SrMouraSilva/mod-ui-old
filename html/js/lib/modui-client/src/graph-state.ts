@@ -22,6 +22,8 @@ export interface ModelPlugin {
   x: number;
   y: number;
   bypassed: boolean;
+  /** Last known value of each control input port (by symbol), from `param_set` frames and from `Param.setValue()`. */
+  values: Map<string, number>;
 }
 
 /** A port of the pedalboard itself (physical, virtual or MIDI), from `add_hw_port`. */
@@ -79,6 +81,7 @@ export class GraphModel {
             x: parseFloat(x) || 0,
             y: parseFloat(y) || 0,
             bypassed: bypassed === '1',
+            values: new Map(),
           });
         }
         break;
@@ -118,6 +121,8 @@ export class GraphModel {
         const plugin = this.plugins.get(parts[0]);
         if (plugin && parts[1] === ':bypass') {
           plugin.bypassed = parseFloat(parts[2]) >= 0.5;
+        } else if (plugin && parts[1] && !isNaN(parseFloat(parts[2]))) {
+          plugin.values.set(parts[1], parseFloat(parts[2]));
         }
         break;
       }
@@ -181,6 +186,11 @@ export class GraphState {
         }
       });
     }
+  }
+
+  /** The model as it is now, without waiting for the socket. Use {@link GraphState.ready} before trusting it. */
+  peek(): GraphModel {
+    return this.model;
   }
 
   /**

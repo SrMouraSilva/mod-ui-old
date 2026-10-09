@@ -54,7 +54,7 @@ import { ModUiError, ModUiHttpError, ModUiTimeoutError } from './errors';
 import { EventChannel } from './events';
 import { ImageStatus, PedalboardImages } from './pedalboard-images';
 import { PedalboardConnections, PedalboardPortGroup, PedalboardPorts } from './pedalboard-connections';
-import { PedalboardConnection, PluginInstance, Port } from './pedalboard-graph';
+import { Param, PedalboardConnection, PluginInstance, PluginParams, Port } from './pedalboard-graph';
 import { PedalboardPlugins } from './pedalboard-plugins';
 import { PedalboardReference, PedalboardsApi } from './pedalboards';
 import { Plugin, PluginsApi } from './plugins';
@@ -68,7 +68,7 @@ export { EventChannel } from './events';
 export type { MessageHandler, Waiting } from './events';
 export { ImageStatus, PedalboardImages } from './pedalboard-images';
 export { PedalboardConnections, PedalboardPortGroup, PedalboardPorts } from './pedalboard-connections';
-export { PedalboardConnection, PluginInstance, Port } from './pedalboard-graph';
+export { Param, PedalboardConnection, PluginInstance, PluginParams, Port } from './pedalboard-graph';
 export type { PortGroups, PortsByDirection } from './pedalboard-graph';
 export { PedalboardPlugins } from './pedalboard-plugins';
 export { PedalboardReference, PedalboardsApi } from './pedalboards';
@@ -95,6 +95,8 @@ if (typeof window !== 'undefined') {
     Plugin,
     PluginsApi,
     PluginInstance,
+    Param,
+    PluginParams,
     PedalboardPlugins,
     PedalboardConnection,
     PedalboardConnections,

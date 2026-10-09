@@ -15,7 +15,8 @@ mod-ui is the web interface of MOD audio devices.
 - **Typed client**: `html/js/lib/modui-client/` (sources in `src/`, tests in `test/`), a class-based TypeScript
   client built on `fetch` and the main WebSocket. Current scope: pedalboards (list, info, remove, load, loadDefault, reset, currentPedalboard get/save/saveAs)
   and live editing of the running pedalboard (`device.plugins.list`, `currentPedalboard.plugins` list/add/remove,
-  `.connections` list/connect/disconnect, `.ports.list()` and `.ports.<audio|midi|cv>.<input()|output()>`).
+  `.connections` list/connect/disconnect, `.ports.list()` and `.ports.<audio|midi|cv>.<input()|output()>`; per instance:
+  `params.list/get` + `Param.setValue`, `isActive/setActive/toggle`, `move`).
   Cloud-related endpoints are planned under `client.cloud`.
   Developer guide with diagrams: `docs/modui-client.md`.
 - **Plans**: `docs/plans/` (see "Plans" below).
@@ -53,7 +54,10 @@ or a WebSocket message (`msg_callback`/`write_message` in `mod/host.py`, `mod/se
    when the change affects an area the client covers (today: pedalboards). New areas are added on request and
    planned first (see "Plans").
 3. Add or adjust tests in `html/js/lib/modui-client/test/` and run `npm test`.
-4. Update `docs/modui-client.md` (including its Mermaid diagrams) and the README section
+4. Update the operation's row in `docs/modui-client/implementation-progress.md` when the client gains or loses an operation,
+   then run `python3 docs/modui-client/sync-progress.py` (it regenerates the summary table and the html dashboard
+   `implementation-progress.html`; never edit those by hand).
+5. Update `docs/modui-client.md` (including its Mermaid diagrams) and the README section
    "TypeScript client (modui-client)" when the API or its usage changes.
 
 ### Do not change the backend without asking

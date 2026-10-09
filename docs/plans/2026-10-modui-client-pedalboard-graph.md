@@ -1,6 +1,6 @@
 # Plan: `ModUiClient` – pedalboard graph (plugins and connections)
 
-Status: **implemented** (2026-10-07), except the items under "Separate suggestions" (`plugins.remove` was added on request). Builds on `2026-10-modui-client-pedalboard.md` (the `Device` queue,
+Status: **implemented** (2026-10-07), except the items under "Separate suggestions" (`plugins.remove` and, on 2026-10-08, parameters, bypass and move were added on request). Builds on `2026-10-modui-client-pedalboard.md` (the `Device` queue,
 `client.events`, `currentPedalboard`).
 
 ## Context
@@ -84,6 +84,13 @@ Mapping to the endpoints:
 3. Shared socket (`options.webSocket`): the snapshot is read through a short-lived second socket (the proposal; no answer
    was given, the default was used). Needs a `WebSocket` class, otherwise `ModUiError`.
 4. `plugins.remove(instance)` is implemented too (it was listed as a suggestion).
+5. (2026-10-08) Parameters, bypass and position are implemented, modelled with the author's PluginsManager as a reference
+   (see `docs/modui-client/implementation-progress.md`):
+   - `instance.params.list(): Param[]` and `instance.params.get(symbol): Param | undefined`. Synchronous: the description is
+     part of the instance (`PluginInfo.ports.control.input`), so nothing is asynchronous.
+   - `Param { symbol, name, default, minimum, maximum, designation, properties, value }` and `await param.setValue(v)`.
+   - `await instance.isActive()`, `await instance.setActive(active)`, `await instance.toggle()` (resolves with the new state).
+   - `await instance.move({ x, y })`.
 
 ## Implementation notes (differences from the draft)
 - The wire interface `PedalboardConnection` of `types.ts` (a connection stored in a bundle: `source` / `target`) was renamed
@@ -102,6 +109,18 @@ Mapping to the endpoints:
   `src/pedalboard-graph.ts` (`PluginInstance`, `Port`, `PedalboardConnection`, engine), `src/graph-state.ts`; tests
   `test/plugins.test.ts`, `test/pedalboard-graph.test.ts`. `docs/openapi.yml` documents the quirks; `docs/modui-client.md`
   has the class diagram and the flow 5.6.
+
+### Notes on parameters, bypass and move
+- All of them are WebSocket messages (`param_set <instance>/<symbol> <value>`, `param_set <instance>/:bypass <1.0|0.0>`,
+  `plugin_pos <instance> <x> <y>`). The backend broadcasts them to the **other** sockets and never answers the sender, so the
+  calls cannot wait for a confirmation: they resolve once the message is sent, and update the local model at once.
+- The backend raises (and closes the socket) for an instance that does not exist, so the client checks the model first and
+  rejects with `ModUiError` without sending. It also refuses `NaN`, values outside `minimum`..`maximum`, and the ports the host
+  drives itself (designations enabled, free-wheeling, beats per bar, beats per minute, speed), which the host would ignore.
+- The model keeps `values` per plugin (fed by `param_set` frames, including the replay) and `bypassed`; `x`, `y`, `Param.value`
+  and `isActive()` read it live. The `bypassed` attribute of `PluginInstance` was removed in favour of `isActive()`
+  (`active = !bypassed`), and `x` / `y` stopped being a snapshot (reading from the model is synchronous, so an attribute is fine).
+- `setValue()` does not apply the plugin's `integer` / `toggled` / enumeration properties; it only checks the range.
 
 ## Backend change policy for this area
 No backend change is planned. Candidates to **ask the user before doing** (record the answer here):
@@ -136,7 +155,7 @@ the classic UI follow. If no server is available, report that this step was not 
 
 | Idea | Endpoint / message | Notes |
 |------|--------------------|-------|
-| `instance.setParam(symbol, value)`, `bypass(b)`, `move(x, y)`, patch parameters | WS `param_set`, `plugin_pos`, `patch_set` | the real way to change values; `reportParameterToHmi` is only needed for addressed ports |
+| Patch parameters (`instance.patch...`) | WS `patch_get`, `patch_set` | LV2 patch parameters (strings, paths, ...); not control ports |
 | `port.address(...)` / `unaddress()` | `POST /effect/parameter/address/{port}` (`addressParameter`), WS `hw_map` / `midi_map` / `cv_map` | belongs to a future "addressing" area with actuators (`act_add`, `hw_*`) |
 | `reportParameterToHmi` | `POST /effect/parameter/set/` | internal helper of `setParam` for addressed ports; the body is a JSON string |
 | `cv.addPluginPort` / `removePluginPort` | `POST /pedalboard/cv_addressing_plugin_port/{add,remove}` (`addCvPluginPort`, `removeCvPluginPort`), WS `add_cv_port` | same area as addressing |
@@ -147,6 +166,7 @@ the classic UI follow. If no server is available, report that this step was not 
 | Typed events (`currentPedalboard.on('plugin-added' \| 'connected' …)`) | WS frames | almost free once the model exists |
 
 ## Revisions
+- **2026-10-08 (2)** — `instance.params`, `Param.setValue`, `isActive` / `setActive` / `toggle`, `move` implemented (design by the author, PluginsManager as reference).
 - **2026-10-07** — First draft.
 - **2026-10-08** — Ports API simplified: `PluginInstance.ports` is `{ audio, midi, cv } x { input, output }`; `currentPedalboard.ports` follows the same pattern, with `input()` / `output()` as functions returning promises; `ports.list()` is kept.
 - **2026-10-07 (2)** — Implemented (see "Decisions" and "Implementation notes"); `plugins.remove` added.
