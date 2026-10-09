@@ -221,6 +221,51 @@ export const midiInfo = {
   },
 };
 
+export const patchUri = 'http://example.org/plugins/Patcher';
+export const labelUri = patchUri + '#label';
+export const sampleUri = patchUri + '#sample';
+export const loopUri = patchUri + '#loop';
+export const stepsUri = patchUri + '#steps';
+export const chunkUri = patchUri + '#chunk';
+
+const atom = (name: string) => 'http://lv2plug.in/ns/ext/atom#' + name;
+function parameter(uri: string, type: string, extra: Record<string, unknown> = {}) {
+  return {
+    valid: true,
+    readable: true,
+    writable: true,
+    uri,
+    label: uri.slice(uri.indexOf('#') + 1),
+    type,
+    ranges: { minimum: '', maximum: '', default: '' },
+    comment: '',
+    shortName: '',
+    fileTypes: [],
+    supportedExtensions: [],
+    ...extra,
+  };
+}
+
+/** A plugin with patch parameters: a string, a path, a bool, an int and a vector (not handled by the client). */
+export const patchInfo = {
+  ...gainInfo,
+  uri: patchUri,
+  name: 'Patcher',
+  label: 'Patcher',
+  ports: { audio: gainInfo.ports.audio },
+  parameters: [
+    parameter(labelUri, atom('String'), { ranges: { minimum: '', maximum: '', default: 'Hello' } }),
+    parameter(sampleUri, atom('Path'), {
+      readable: false,
+      fileTypes: ['audio'],
+      supportedExtensions: ['wav', '.FLAC'],
+    }),
+    parameter(loopUri, atom('Bool'), { ranges: { minimum: 0, maximum: 1, default: 0 } }),
+    parameter(stepsUri, atom('Int'), { ranges: { minimum: 1, maximum: 16, default: 8 }, writable: false }),
+    parameter(chunkUri, atom('Chunk')),
+  ],
+};
+
 export const pluginSummaries = [gainInfo, midiInfo].map(({ ports: _ports, binary: _b, ...summary }) => summary);
 
 /** Frames of a device with 2 audio inputs/outputs, one MIDI in and one MIDI out. */

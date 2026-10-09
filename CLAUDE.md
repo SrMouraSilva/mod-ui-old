@@ -16,7 +16,7 @@ mod-ui is the web interface of MOD audio devices.
   client built on `fetch` and the main WebSocket. Current scope: pedalboards (list, info, remove, load, loadDefault, reset, currentPedalboard get/save/saveAs)
   and live editing of the running pedalboard (`device.plugins.list`, `currentPedalboard.plugins` list/add/remove,
   `.connections` list/connect/disconnect, `.ports.list()` and `.ports.<audio|midi|cv>.<input()|output()>`; per instance:
-  `params.list/get` + `Param.setValue`, `isActive/setActive/toggle`, `move`).
+  `params.list/get` + `Param.setValue`, `patchParams.list/get` + `PatchParam.setValue/refresh`, `isActive/setActive/toggle`, `move`).
   Cloud-related endpoints are planned under `client.cloud`.
   Developer guide with diagrams: `docs/modui-client.md`.
 - **Plans**: `docs/plans/` (see "Plans" below).
@@ -70,7 +70,7 @@ own for the client's sake.
 
 ### TypeScript client conventions
 - One module per concern in `src/` (`client.ts`, `pedalboards.ts`, `device.ts`, `events.ts`, `http.ts`,
-  `errors.ts`, `types.ts`, `runtime.ts`, `plugins.ts`, `pedalboard-*.ts`, `graph-state.ts`); `src/index.ts` is the build entry, re-exports the public API and sets
+  `errors.ts`, `types.ts`, `runtime.ts`, `plugins.ts`, `pedalboard-*.ts`, `patch-params.ts`, `graph-state.ts`); `src/index.ts` is the build entry, re-exports the public API and sets
   `window.ModUiClient` / `window.ModUi`. New areas get their own module and test file.
 - Tests: one file per area in `test/`, sharing fakes from `test/helpers.ts` (`makeClient`, `connected`,
   `FakeWebSocket`, `flush`, `connectedWith` for a replay that carries graph frames).

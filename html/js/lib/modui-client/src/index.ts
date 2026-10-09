@@ -36,6 +36,7 @@
  * | `pedalboard-plugins.ts` | {@link PedalboardPlugins} (`currentPedalboard.plugins`) — list / add / remove |
  * | `pedalboard-connections.ts` | {@link PedalboardConnections} (`currentPedalboard.connections`), {@link PedalboardPorts} (`currentPedalboard.ports.list()`, `.audio.input()` …) |
  * | `pedalboard-graph.ts` | {@link PluginInstance}, {@link Port}, {@link PedalboardConnection}, and the internal engine |
+ * | `patch-params.ts` | {@link PatchParam}, {@link PluginPatchParams} (`instance.patchParams`) — strings, paths, booleans, ... |
  * | `graph-state.ts` | internal WebSocket-fed model of the running graph |
  * | `pedalboard-images.ts` | {@link PedalboardImages} (`reference.images`), {@link ImageStatus} — screenshot and thumbnail |
  * | `events.ts` | {@link EventChannel} (`client.events`) — the main WebSocket |
@@ -55,6 +56,7 @@ import { EventChannel } from './events';
 import { ImageStatus, PedalboardImages } from './pedalboard-images';
 import { PedalboardConnections, PedalboardPortGroup, PedalboardPorts } from './pedalboard-connections';
 import { Param, PedalboardConnection, PluginInstance, PluginParams, Port } from './pedalboard-graph';
+import { PatchParam, PluginPatchParams } from './patch-params';
 import { PedalboardPlugins } from './pedalboard-plugins';
 import { PedalboardReference, PedalboardsApi } from './pedalboards';
 import { Plugin, PluginsApi } from './plugins';
@@ -70,6 +72,7 @@ export { ImageStatus, PedalboardImages } from './pedalboard-images';
 export { PedalboardConnections, PedalboardPortGroup, PedalboardPorts } from './pedalboard-connections';
 export { Param, PedalboardConnection, PluginInstance, PluginParams, Port } from './pedalboard-graph';
 export type { PortGroups, PortsByDirection } from './pedalboard-graph';
+export { PatchParam, PluginPatchParams } from './patch-params';
 export { PedalboardPlugins } from './pedalboard-plugins';
 export { PedalboardReference, PedalboardsApi } from './pedalboards';
 export { Plugin, PluginsApi } from './plugins';
@@ -97,6 +100,8 @@ if (typeof window !== 'undefined') {
     PluginInstance,
     Param,
     PluginParams,
+    PatchParam,
+    PluginPatchParams,
     PedalboardPlugins,
     PedalboardConnection,
     PedalboardConnections,

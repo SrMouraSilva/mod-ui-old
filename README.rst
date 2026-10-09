@@ -113,6 +113,7 @@ Usage in the page (or in the browser console), where it is available as ``window
     await connections.disconnect(connection);
     await instance.params.get('gain').setValue(3.5);   // control values: a live `value`, range checked
     await instance.setActive(false);                   // bypass (also isActive(), toggle())
+    await instance.patchParams.get(uri).setValue('Verse');   // strings, paths, booleans, ...: typed, validated (also refresh())
     await instance.move({ x: 320, y: 140 });
     await plugins.remove(instance);
 
@@ -120,7 +121,8 @@ From another origin or from Node, pass ``new ModUiClient({ baseUrl: 'http://modd
 The developer guide, with architecture, class and sequence diagrams, is ``docs/modui-client.md``.
 Every public symbol is documented in the sources (TSDoc); the current scope (pedalboards) and the planned API
 are in ``docs/plans/2026-10-modui-client-pedalboard.md`` (live editing of the running pedalboard:
-``docs/plans/2026-10-modui-client-pedalboard-graph.md``).
+``docs/plans/2026-10-modui-client-pedalboard-graph.md``; patch parameters such as strings and file paths:
+``docs/plans/2026-10-modui-client-patch-params.md``).
 
 Known limitation: when the client loads a pedalboard while the classic UI is open, the canvas reloads through the
 WebSocket, but the title shown by the classic UI is not updated.

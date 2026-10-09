@@ -213,6 +213,31 @@ export interface PluginPortsByDirection {
   output?: PluginPortInfo[];
 }
 
+/** A patch parameter in a plugin description (schema `PluginParameter`). */
+export interface PluginParameterInfo {
+  valid?: boolean;
+  readable: boolean;
+  writable: boolean;
+  uri: string;
+  label: string;
+  /** Atom type URI, e.g. `http://lv2plug.in/ns/ext/atom#String`. */
+  type: string;
+  /** Numbers for numeric types, empty `minimum` / `maximum` and a string `default` for `#String`; `null` or missing when none. */
+  ranges?: { minimum?: number | string; maximum?: number | string; default?: number | string } | null;
+  comment?: string;
+  shortName?: string;
+  /** Kinds of user files a path accepts (`/files/list` types). */
+  fileTypes?: string[];
+  /** File extensions a path accepts, as the plugin lists them. */
+  supportedExtensions?: string[];
+}
+
+/** Type of a patch parameter (LV2 `patch:writable` / `patch:readable`); see {@link PatchParam}. */
+export type PatchParamType = 'bool' | 'int' | 'long' | 'float' | 'double' | 'string' | 'path' | 'uri';
+
+/** A patch parameter value: `boolean` for `bool`, `number` for the numeric types, `string` for `string`, `path` and `uri`. */
+export type PatchValue = boolean | number | string;
+
 /**
  * Full description of a plugin: `GET /effect/get` and `POST /effect/bulk/`, and the answer of `GET /effect/add/…`
  * (schema `PluginInfo`). Only the fields this client uses are typed; the server sends more.
@@ -230,6 +255,8 @@ export interface PluginInfo extends PluginSummary {
     cv?: PluginPortsByDirection;
     midi?: PluginPortsByDirection;
   };
+  /** Patch parameters (strings, paths, booleans, ...); use `instance.patchParams` instead of reading this. */
+  parameters?: PluginParameterInfo[];
   [other: string]: unknown;
 }
 

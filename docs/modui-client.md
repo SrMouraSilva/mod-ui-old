@@ -176,6 +176,15 @@ await gainParam.setValue(3.5);                         // throws ModUiError outs
 // Position in the canvas
 console.log(gain.x, gain.y);                           // live attributes
 await gain.move({ x: 320, y: 140 });
+
+// Patch parameters ("PatchParam"): typed values that are not control ports (strings, file paths, URIs, booleans, integers)
+// `plugin`: a PluginInstance whose plugin declares patch parameters
+const label = plugin.patchParams.get('http://example.org/plugin#label');   // PatchParam | undefined, by URI
+plugin.patchParams.list();                             // PatchParam[], synchronous; vectors and other atom types are left out
+console.log(label.type, label.writable, label.readable, label.default);    // type: 'bool' | 'int' | 'long' | 'float' | 'double' | 'string' | 'path' | 'uri'
+console.log(label.value);                              // live attribute, undefined until a value is known
+await label.setValue('Verse');                         // validated by type; throws ModUiError and sends nothing when it does not fit
+console.log(await label.refresh());                    // asks the plugin (patch_get) and waits for its answer; ModUiTimeoutError if silent
 ```
 
 ### 1.9 Save the pedalboard
@@ -222,6 +231,9 @@ off();
 
 ### 1.13 Notes
 
+- `PatchParam.setValue()` is also fire-and-forget (`patch_set`, not confirmed to the sender); `refresh()` is the only call
+  with an answer (`patch_get` → `patch_set` to every socket). It waits outside the device queue, so a silent plugin does not
+  block loads or saves. Strings must be non-empty and free of control characters; numbers must fit the type and the range.
 - `setValue()`, `setActive()`, `toggle()` and `move()` are WebSocket messages (`param_set`, `plugin_pos`) that the backend
   never confirms to the socket that sent them (only to the others), so they resolve **once the message was sent**, and the
   attributes (`value`, `x`, `y`) and `isActive()` already show the new state. They are queued behind loads and saves.
@@ -306,6 +318,7 @@ html/js/lib/modui-client/
 │   ├── pedalboard-plugins.ts      # PedalboardPlugins (currentPedalboard.plugins)
 │   ├── pedalboard-connections.ts  # PedalboardConnections, PedalboardPorts, PedalboardPortGroup (currentPedalboard.connections / .ports)
 │   ├── pedalboard-graph.ts        # PluginInstance, Port, PedalboardConnection + the internal engine
+│   ├── patch-params.ts            # PatchParam, PluginPatchParams (instance.patchParams)
 │   ├── graph-state.ts   # internal: WebSocket-fed model of the running graph
 │   ├── events.ts        # EventChannel, MessageHandler, Waiting
 │   ├── http.ts          # HttpTransport (internal)
@@ -483,6 +496,7 @@ classDiagram
     +info: PluginInfo | null
     +ports: PortGroups
     +params: PluginParams
+    +patchParams: PluginPatchParams
     +port(symbol) Port | undefined
     +isActive() Promise~boolean~
     +setActive(active: boolean) Promise~void~
@@ -493,6 +507,25 @@ classDiagram
   class PluginParams {
     +list() Param[]
     +get(symbol) Param | undefined
+  }
+  class PluginPatchParams {
+    +list() PatchParam[]
+    +get(uri) PatchParam | undefined
+  }
+  class PatchParam {
+    +uri: string
+    +label: string
+    +type: PatchParamType
+    +readable: boolean
+    +writable: boolean
+    +default: PatchValue
+    +minimum: number
+    +maximum: number
+    +fileTypes: string[]
+    +supportedExtensions: string[]
+    +value: PatchValue
+    +refresh(options) Promise~PatchValue~
+    +setValue(value: PatchValue) Promise~void~
   }
   class Param {
     +symbol: string
@@ -600,6 +633,9 @@ classDiagram
   PluginInstance *-- PluginParams : params
   PluginParams *-- "*" Param : list(), get(symbol)
   Param --> PluginInstance : owner
+  PluginInstance *-- PluginPatchParams : patchParams
+  PluginPatchParams *-- "*" PatchParam : list(), get(uri)
+  PatchParam --> PluginInstance : owner
   PedalboardConnection --> Port : from, to
   GraphState --> EventChannel : on(...) before connect()
   ModUiClient ..> ModUiClientOptions : configured by
@@ -1060,6 +1096,7 @@ must run the build before installing `html/` (`setup.py` and `mod-deploy.sh` pic
 - `currentPedalboard.save()` / `saveAs()` wait for the thumbnail regeneration, which can take a few seconds on a device (the renderer runs at low priority); a failure of that wait is ignored.
 - Plugins and connections come from the WebSocket, not from an endpoint. After an own socket reconnects, pedalboard ports that disappeared in between stay in the model until the backend announces them again.
 - `setValue()`, `setActive()`, `toggle()` and `move()` cannot confirm anything: the backend does not answer the sender of `param_set` / `plugin_pos`. They resolve when the message is sent; if the backend refuses a value (it only refuses ports with a host designation, which the client already blocks), nothing tells the caller.
+- `PatchParam.setValue()` cannot confirm anything either (the sender of `patch_set` gets no frame). Only `"` is escaped on the way to mod-host, so a backslash in a string reaches the plugin as it is. Empty strings are refused by the client. Only parameters the host tracks (atom types Bool, Int, Long, Float, Double, String, Path, URI, with ranges) report values; vectors are not supported. Whether `refresh()` gets an answer depends on the plugin.
 - `plugins.add()` always generates the instance name (like the classic UI). If the backend creates the plugin but cannot read its description, it answers `404` and the plugin stays in the pedalboard.
 - `connections.disconnect()` checks the model first because the backend answers `true` and announces `disconnect` even when nothing was connected. A connection made by another client a moment ago is known as soon as its `connect` frame arrives.
 - Connections to plugins that are not installed are left out of `connections.list()` (their ports are unknown).

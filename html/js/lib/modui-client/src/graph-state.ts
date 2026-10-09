@@ -24,6 +24,11 @@ export interface ModelPlugin {
   bypassed: boolean;
   /** Last known value of each control input port (by symbol), from `param_set` frames and from `Param.setValue()`. */
   values: Map<string, number>;
+  /**
+   * Raw text of the last known value of each patch parameter (by URI), from `patch_set` frames and from
+   * `PatchParam.setValue()`. Parsed by the parameter's type when read.
+   */
+  patches: Map<string, string>;
 }
 
 /** A port of the pedalboard itself (physical, virtual or MIDI), from `add_hw_port`. */
@@ -82,6 +87,7 @@ export class GraphModel {
             y: parseFloat(y) || 0,
             bypassed: bypassed === '1',
             values: new Map(),
+            patches: new Map(),
           });
         }
         break;
@@ -126,6 +132,15 @@ export class GraphModel {
         }
         break;
       }
+      case 'patch_set': {
+        // <instance> <writable:0|1> <uri> <type:char> <value...>; the value is the rest of the line and may hold spaces.
+        const [instance, , uri, , ...value] = args.split(' ');
+        const plugin = this.plugins.get(instance);
+        if (plugin && uri) {
+          plugin.patches.set(uri, value.join(' '));
+        }
+        break;
+      }
     }
   }
 
@@ -157,6 +172,7 @@ const GRAPH_COMMANDS = [
   'disconnect',
   'plugin_pos',
   'param_set',
+  'patch_set',
 ];
 
 /**

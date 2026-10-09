@@ -11,6 +11,7 @@ import { ModUiError } from './errors';
 import type { EventChannel } from './events';
 import type { HttpTransport } from './http';
 import type { GraphModel, GraphState, ModelPlugin } from './graph-state';
+import { PluginPatchParams, patchFrameValue } from './patch-params';
 import type { PluginsApi } from './plugins';
 import type { PluginInfo, PluginPortInfo, PluginTarget, PortDirection, PortType, Position } from './types';
 
@@ -46,6 +47,10 @@ export interface InstanceOps {
   live(instance: string): ModelPlugin | undefined;
   remove(instance: string): Promise<void>;
   setParam(instance: string, symbol: string, value: number): Promise<void>;
+  /** Sends `patch_set` with the already validated and encoded value. */
+  setPatch(instance: string, uri: string, typeChar: string, encoded: string): Promise<void>;
+  /** Sends `patch_get` and resolves with the raw text of the answer. */
+  refreshPatch(instance: string, uri: string, timeoutMs?: number): Promise<string>;
   isActive(instance: string): Promise<boolean>;
   setActive(instance: string, active: boolean): Promise<void>;
   toggle(instance: string): Promise<boolean>;
@@ -177,6 +182,8 @@ export class PluginInstance {
   readonly ports: PortGroups = emptyPortGroups();
   /** The control inputs (knobs, switches, ...): `params.list()`, `params.get('gain')`. */
   readonly params: PluginParams;
+  /** The patch parameters (strings, paths, booleans, ...): `patchParams.list()`, `patchParams.get(uri)`. */
+  readonly patchParams: PluginPatchParams;
 
   /** @internal Built by the client. */
   constructor(
@@ -203,6 +210,7 @@ export class PluginInstance {
       }
     }
     this.params = new PluginParams(params);
+    this.patchParams = new PluginPatchParams(this, info?.parameters ?? [], ops);
   }
 
   /** @internal The live state of this plugin (the last known one when it was removed). */
@@ -493,7 +501,7 @@ export class PedalboardGraph {
     });
   }
 
-  // The backend sends no confirmation to the socket that sent "param_set" or "plugin_pos" (only to the others), so these
+  // The backend sends no confirmation to the socket that sent "param_set", "patch_set" or "plugin_pos" (only to the others), so these
   // calls resolve once the message is sent, and update the model themselves.
 
   setParam(instance: string, symbol: string, value: number): Promise<void> {
@@ -502,6 +510,36 @@ export class PedalboardGraph {
       this.events.send(`param_set ${instance}/${symbol} ${value}`);
       plugin.values.set(symbol, value);
     });
+  }
+
+  setPatch(instance: string, uri: string, typeChar: string, encoded: string): Promise<void> {
+    return this.enqueue(async () => {
+      const plugin = await this.requirePlugin(instance);
+      this.events.send(`patch_set ${instance} ${uri} ${typeChar} ${encoded}`);
+      plugin.patches.set(uri, encoded);
+    });
+  }
+
+  /**
+   * `patch_get` is answered by a `patch_set` frame to every socket. The wait is registered before the request is sent and
+   * the queue is left before waiting, so a slow or silent plugin does not block loads, saves and other calls.
+   */
+  async refreshPatch(instance: string, uri: string, timeoutMs: number = this.confirmTimeoutMs): Promise<string> {
+    const answer = await this.enqueue(async () => {
+      await this.requirePlugin(instance);
+      const waiting = this.events.waitFor('patch_set', timeoutMs, (args) => {
+        const [id, , parameter] = args.split(' ');
+        return id === instance && parameter === uri;
+      });
+      try {
+        this.events.send(`patch_get ${instance} ${uri}`);
+      } catch (error) {
+        waiting.cancel();
+        throw error;
+      }
+      return waiting;
+    });
+    return patchFrameValue(await answer.promise) ?? '';
   }
 
   isActive(instance: string): Promise<boolean> {
@@ -595,6 +633,8 @@ export class PedalboardGraph {
     live: (instance) => this.state.peek().plugins.get(instance),
     remove: (instance) => this.removePlugin(instance),
     setParam: (instance, symbol, value) => this.setParam(instance, symbol, value),
+    setPatch: (instance, uri, typeChar, encoded) => this.setPatch(instance, uri, typeChar, encoded),
+    refreshPatch: (instance, uri, timeoutMs) => this.refreshPatch(instance, uri, timeoutMs),
     isActive: (instance) => this.isActive(instance),
     setActive: (instance, active) => this.setActive(instance, active),
     toggle: (instance) => this.toggle(instance),

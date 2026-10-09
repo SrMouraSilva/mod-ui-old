@@ -155,7 +155,7 @@ the classic UI follow. If no server is available, report that this step was not 
 
 | Idea | Endpoint / message | Notes |
 |------|--------------------|-------|
-| Patch parameters (`instance.patch...`) | WS `patch_get`, `patch_set` | LV2 patch parameters (strings, paths, ...); not control ports |
+| Patch parameters (`instance.patchParams`) | WS `patch_get`, `patch_set` | LV2 patch parameters (strings, paths, ...); not control ports. Planned in `2026-10-modui-client-patch-params.md` |
 | `port.address(...)` / `unaddress()` | `POST /effect/parameter/address/{port}` (`addressParameter`), WS `hw_map` / `midi_map` / `cv_map` | belongs to a future "addressing" area with actuators (`act_add`, `hw_*`) |
 | `reportParameterToHmi` | `POST /effect/parameter/set/` | internal helper of `setParam` for addressed ports; the body is a JSON string |
 | `cv.addPluginPort` / `removePluginPort` | `POST /pedalboard/cv_addressing_plugin_port/{add,remove}` (`addCvPluginPort`, `removeCvPluginPort`), WS `add_cv_port` | same area as addressing |
