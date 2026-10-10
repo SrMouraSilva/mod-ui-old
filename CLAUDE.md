@@ -12,7 +12,7 @@ mod-ui is the web interface of MOD audio devices.
 - **Frontend**: classic jQuery code in `html/` (`html/js/*.js`, templates in `html/*.html` and `html/include/`).
 - **API contract**: `docs/openapi.yml` documents every HTTP endpoint, every WebSocket message
   (`/websocket`, `/rpbsocket`, `/rplsocket`), the server-rendered pages and the other channels.
-- **Typed client**: `html/js/lib/modui-client/` (sources in `src/`, tests in `test/`), a class-based TypeScript
+- **Typed client**: `modui-client/` (sources in `src/`, tests in `test/`), a class-based TypeScript
   client built on `fetch` and the main WebSocket. Current scope: pedalboards (list, info, remove, load, loadDefault, reset, currentPedalboard get/save/saveAs)
   and live editing of the running pedalboard (`device.plugins.list`, `currentPedalboard.plugins` list/add/remove,
   `.connections` list/connect/disconnect, `.ports.list()` and `.ports.<audio|midi|cv>.<input()|output()>`; per instance:
@@ -29,7 +29,7 @@ pip3 install -r requirements.txt && make -C utils
 MOD_DEV_HOST=1 MOD_DEV_ENVIRONMENT=0 python3 ./server.py      # http://localhost:8888/
 
 # TypeScript client (Node.js >= 22.12)
-cd html/js/lib/modui-client
+cd modui-client
 npm install
 npm test          # tsc --noEmit + vitest
 npm run build     # writes html/js/lib/modui-client.js (generated, git-ignored)
@@ -50,10 +50,10 @@ or a WebSocket message (`msg_callback`/`write_message` in `mod/host.py`, `mod/se
    It must stay valid: `npx @redocly/cli lint docs/openapi.yml`. The trailing-slash, 2XX and 4XX rules flag
    real routes, so they can be skipped
    (`--skip-rule=no-path-trailing-slash --skip-rule=operation-2xx-response --skip-rule=operation-4xx-response --skip-rule=no-unused-components`).
-2. Update the client in `html/js/lib/modui-client/src/` (wire types in `types.ts`, behaviour in the area module)
+2. Update the client in `modui-client/src/` (wire types in `types.ts`, behaviour in the area module)
    when the change affects an area the client covers (today: pedalboards). New areas are added on request and
    planned first (see "Plans").
-3. Add or adjust tests in `html/js/lib/modui-client/test/` and run `npm test`.
+3. Add or adjust tests in `modui-client/test/` and run `npm test`.
 4. Update the operation's row in `docs/modui-client/implementation-progress.md` when the client gains or loses an operation,
    then run `python3 docs/modui-client/sync-progress.py` (it regenerates the summary table and the html dashboard
    `implementation-progress.html`; never edit those by hand).

@@ -71,10 +71,10 @@ Open it with any OpenAPI viewer (Swagger UI, Redoc, the VS Code OpenAPI extensio
 TypeScript client (modui-client)
 --------------------------------
 
-``html/js/lib/modui-client/`` contains a small, typed client for the backend (``fetch`` + WebSocket).
+``modui-client/`` contains a small, typed client for the backend (``fetch`` + WebSocket).
 It is optional: the existing UI does not depend on it and Python-only work needs none of this.
 
-The sources live in ``html/js/lib/modui-client/src/`` (one module per area) and the tests in ``test/``.
+The sources live in ``modui-client/src/`` (one module per area) and the tests in ``test/``.
 The build bundles them into one plain JavaScript file, ``html/js/lib/modui-client.js``. That file is **generated and not versioned** (see ``.gitignore``);
 ``index.html`` loads it, ``setup.py`` and ``mod-deploy.sh`` pick it up with the other ``html/js/lib/*.js`` files.
 If you do not build it, the page still works, the browser just reports a 404 for that script.
@@ -83,7 +83,7 @@ Requirements: Node.js 22.12 or newer.
 
 Build, watch and test::
 
-    $ cd html/js/lib/modui-client
+    $ cd modui-client
     $ npm install
     $ npm run build      # writes html/js/lib/modui-client.js
     $ npm run watch      # rebuilds on change, with an inline source map

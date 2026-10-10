@@ -4,8 +4,8 @@
 `fetch` (HTTP) and listens to the main WebSocket (`/websocket`), so callers can `await` operations until the
 backend has *really* finished them (for example, until a pedalboard is fully loaded).
 
-- **Source**: [`html/js/lib/modui-client/src/`](../html/js/lib/modui-client/src/)
-- **Tests**: [`html/js/lib/modui-client/test/`](../html/js/lib/modui-client/test/)
+- **Source**: [`modui-client/src/`](../modui-client/src/)
+- **Tests**: [`modui-client/test/`](../modui-client/test/)
 - **Build output** (generated, not versioned): `html/js/lib/modui-client.js`
 - **Wire contract**: [`docs/openapi.yml`](openapi.yml)
 - **API coverage** (what is implemented, how to use it, what is recommended next): [`docs/modui-client/implementation-progress.md`](modui-client/implementation-progress.md)
@@ -304,7 +304,7 @@ classic UI, other tabs and this client stay in sync.
 ## 3. Source layout
 
 ```
-html/js/lib/modui-client/
+modui-client/
 ├── package.json         # devDependencies only: typescript, esbuild, vitest (exact versions)
 ├── tsconfig.json        # strict, noEmit, ES2018 + DOM
 ├── src/
@@ -1070,10 +1070,10 @@ Checklist for a new area (example: snapshots):
 ## 8. Build and test
 
 ```sh
-cd html/js/lib/modui-client
+cd modui-client
 npm install
 npm test          # tsc --noEmit (strict, no unused locals) + vitest
-npm run build     # esbuild src/index.ts → ../modui-client.js (IIFE, ES2018, not minified)
+npm run build     # esbuild src/index.ts → ../html/js/lib/modui-client.js (IIFE, ES2018, not minified)
 npm run watch     # rebuild on change, inline source map
 ```
 

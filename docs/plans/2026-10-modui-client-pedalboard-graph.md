@@ -147,7 +147,7 @@ with no request; connect between pedalboard ports; duplicate connect; `disconnec
 model reset on `remove :all` / `loading_start`.
 
 ## Verification
-`cd html/js/lib/modui-client && npm test`; `npx @redocly/cli lint docs/openapi.yml` (skip-rules in CLAUDE.md). Manual with
+`cd modui-client && npm test`; `npx @redocly/cli lint docs/openapi.yml` (skip-rules in CLAUDE.md). Manual with
 `MOD_DEV_HOST=1 MOD_DEV_ENVIRONMENT=0 python3 ./server.py`: add Gain, connect `/graph/capture_1` → Gain → `/graph/playback_1`, watch
 the classic UI follow. If no server is available, report that this step was not run.
 
